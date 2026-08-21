@@ -1,64 +1,49 @@
 /**
- * Verifikasi koneksi Google Drive.
+ * Verifikasi koneksi Google Drive (OAuth2).
  *
- * Jalankan setelah ketiga environment variable (GOOGLE_DRIVE_CLIENT_EMAIL,
- * GOOGLE_DRIVE_PRIVATE_KEY, GOOGLE_DRIVE_FOLDER_ID) terisi di .env.local.
+ * Jalankan setelah GOOGLE_DRIVE_CLIENT_ID, GOOGLE_DRIVE_CLIENT_SECRET,
+ * GOOGLE_DRIVE_REFRESH_TOKEN, dan GOOGLE_DRIVE_FOLDER_ID terisi di .env.local.
  *
  *   node scripts/verify-google-drive.mjs
- *
- * Script ini akan:
- *   1. Memvalidasi konfigurasi env.
- *   2. Mendapatkan akses token dari Google (menguji client_email + private_key).
- *   3. Mengecek akses ke folder Drive.
- *   4. Opsional: membuat file tes kecil lalu menghapusnya (uji write).
  */
 
-import { createSign } from "crypto";
 import { readFileSync } from "fs";
 import { resolve } from "path";
 
-/* ── Load .env.local ──────────────────────────────────────── */
-
 const envPath = resolve(process.cwd(), ".env.local");
-let env = {};
+const env = {};
 try {
-  const content = readFileSync(envPath, "utf8");
-  for (const line of content.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const eq = trimmed.indexOf("=");
+  const c = readFileSync(envPath, "utf8");
+  for (const l of c.split("\n")) {
+    const t = l.trim();
+    if (!t || t.startsWith("#")) continue;
+    const eq = t.indexOf("=");
     if (eq === -1) continue;
-    let key = trimmed.slice(0, eq).trim();
-    let val = trimmed.slice(eq + 1).trim();
-    // Strip surrounding quotes
-    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-      val = val.slice(1, -1);
-    }
-    env[key] = val;
+    env[t.slice(0, eq).trim()] = t.slice(eq + 1).trim();
   }
-} catch {
-  console.log("⚠️  .env.local tidak ditemukan, gunakan environment variable yang sudah ada.\n");
-}
+} catch {}
 
-const clientEmail = env.GOOGLE_DRIVE_CLIENT_EMAIL || process.env.GOOGLE_DRIVE_CLIENT_EMAIL || "";
-const privateKey = (env.GOOGLE_DRIVE_PRIVATE_KEY || process.env.GOOGLE_DRIVE_PRIVATE_KEY || "").replace(/\\n/g, "\n");
+const clientId = env.GOOGLE_DRIVE_CLIENT_ID || process.env.GOOGLE_DRIVE_CLIENT_ID || "";
+const clientSecret = env.GOOGLE_DRIVE_CLIENT_SECRET || process.env.GOOGLE_DRIVE_CLIENT_SECRET || "";
+const refreshToken = env.GOOGLE_DRIVE_REFRESH_TOKEN || process.env.GOOGLE_DRIVE_REFRESH_TOKEN || "";
 const folderId = env.GOOGLE_DRIVE_FOLDER_ID || process.env.GOOGLE_DRIVE_FOLDER_ID || "";
 
-/* ── Validasi ─────────────────────────────────────────────── */
+const TOKEN_URI = "https://oauth2.googleapis.com/token";
+const DRIVE_API = "https://www.googleapis.com/drive/v3/files";
+const DRIVE_UPLOAD = "https://www.googleapis.com/upload/drive/v3/files";
+
+/* ── Validate env ─────────────────────────────────────────── */
 
 let errors = 0;
 function check(name, val) {
-  if (!val) {
-    console.log(`❌ ${name} — kosong. Pastikan sudah diisi di .env.local.`);
-    errors++;
-  } else {
-    const preview = val.length > 60 ? val.slice(0, 60) + "..." : val;
-    console.log(`✅ ${name} — ${preview}`);
-  }
+  if (!val) { console.log(`❌ ${name} — kosong.`); errors++; }
+  else { console.log(`✅ ${name} — ${val.length > 50 ? val.slice(0, 50) + "..." : val}`); }
 }
+
 console.log("=== Memeriksa konfigurasi ===\n");
-check("GOOGLE_DRIVE_CLIENT_EMAIL", clientEmail);
-check("GOOGLE_DRIVE_PRIVATE_KEY", privateKey);
+check("GOOGLE_DRIVE_CLIENT_ID", clientId);
+check("GOOGLE_DRIVE_CLIENT_SECRET", clientSecret);
+check("GOOGLE_DRIVE_REFRESH_TOKEN", refreshToken);
 check("GOOGLE_DRIVE_FOLDER_ID", folderId);
 
 if (errors > 0) {
@@ -66,53 +51,29 @@ if (errors > 0) {
   process.exit(1);
 }
 
-/* ── Google Drive REST helpers ─────────────────────────────── */
-
-const TOKEN_URI = "https://oauth2.googleapis.com/token";
-const DRIVE_API = "https://www.googleapis.com/drive/v3/files";
-const DRIVE_UPLOAD = "https://www.googleapis.com/upload/drive/v3/files";
-
-const SCOPES = ["https://www.googleapis.com/auth/drive.file"];
+/* ── Get access token ─────────────────────────────────────── */
 
 async function getAccessToken() {
-  const now = Math.floor(Date.now() / 1000);
-  const b64url = (input) => Buffer.from(typeof input === "string" ? input : JSON.stringify(input)).toString("base64url");
-
-  const header = b64url({ alg: "RS256", typ: "JWT" });
-  const claims = b64url({
-    iss: clientEmail,
-    scope: SCOPES.join(" "),
-    aud: TOKEN_URI,
-    iat: now,
-    exp: now + 3600,
-  });
-
-  const unsigned = `${header}.${claims}`;
-  const sign = createSign("RSA-SHA256");
-  sign.update(unsigned);
-  const signature = sign.sign(privateKey, "base64url");
-  const assertion = `${unsigned}.${signature}`;
-
   const res = await fetch(TOKEN_URI, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
-      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-      assertion,
+      client_id: clientId,
+      client_secret: clientSecret,
+      refresh_token: refreshToken,
+      grant_type: "refresh_token",
     }),
   });
-
   if (!res.ok) {
-    const detail = await res.text();
-    throw new Error(`Google OAuth gagal (${res.status}): ${detail.slice(0, 300)}`);
+    const d = await res.text();
+    throw new Error(`OAuth refresh gagal (${res.status}): ${d.slice(0, 200)}`);
   }
-
   const data = await res.json();
-  if (!data.access_token) throw new Error("Tidak mendapat access token dari Google.");
+  if (!data.access_token) throw new Error("Tidak mendapat access token.");
   return data.access_token;
 }
 
-/* ── Cek folder ───────────────────────────────────────────── */
+/* ── Main ─────────────────────────────────────────────────── */
 
 (async () => {
   console.log("\n=== Menguji koneksi ke Google ===\n");
@@ -120,18 +81,16 @@ async function getAccessToken() {
   let token;
   try {
     token = await getAccessToken();
-    console.log("✅ Access token didapat — private key valid.");
+    console.log("✅ Access token didapat — kredensial valid.");
   } catch (err) {
-    console.log(`❌ Gagal mendapatkan access token: ${err.message}`);
-    console.log("\n   Pastikan:");
-    console.log("   - GOOGLE_DRIVE_CLIENT_EMAIL menggunakan 'client_email' dari JSON (bukan email pribadi).");
-    console.log("   - GOOGLE_DRIVE_PRIVATE_KEY adalah SELURUH isi 'private_key' (termasuk -----BEGIN... sampai -----END-----).");
+    console.log(`❌ Gagal: ${err.message}`);
+    console.log("\n   Pastikan CLIENT_ID, CLIENT_SECRET, dan REFRESH_TOKEN benar.");
+    console.log("   Kalau refresh token hilang, jalankan: node scripts/setup-google-drive.mjs");
     process.exit(1);
   }
 
   console.log("\n=== Mengecek akses ke folder ===\n");
 
-  let filesInFolder = [];
   try {
     const q = `'${folderId}' in parents and trashed=false`;
     const res = await fetch(
@@ -139,87 +98,57 @@ async function getAccessToken() {
       { headers: { Authorization: `Bearer ${token}` } }
     );
     if (!res.ok) {
-      const detail = await res.text();
-      throw new Error(`${res.status}: ${detail.slice(0, 300)}`);
+      const d = await res.text();
+      throw new Error(`${res.status}: ${d.slice(0, 200)}`);
     }
     const data = await res.json();
-    filesInFolder = data.files || [];
-    console.log(`✅ Folder dapat diakses. Terdapat ${filesInFolder.length} file.`);
-    if (filesInFolder.length > 0) {
+    const files = data.files || [];
+    console.log(`✅ Folder dapat diakses. Terdapat ${files.length} file.`);
+    if (files.length > 0) {
       console.log("   File yang ada:");
-      for (const f of filesInFolder) {
-        console.log(`     • ${f.name}  (${f.mimeType})`);
-      }
+      for (const f of files) console.log(`     • ${f.name}  (${f.mimeType})`);
     } else {
       console.log("   (Folder kosong — wajar untuk setup pertama.)");
     }
   } catch (err) {
     console.log(`❌ Folder tidak dapat diakses: ${err.message}`);
-    console.log("\n   Pastikan:");
-    console.log("   - GOOGLE_DRIVE_FOLDER_ID benar (ID dari URL https://drive.google.com/drive/folders/<ID>)");
-    console.log(`   - Folder sudah di-share ke: ${clientEmail} (sebagai Editor)`);
+    console.log("\n   Pastikan GOOGLE_DRIVE_FOLDER_ID benar.");
     process.exit(1);
   }
 
-  /* ── Opsional: tes tulis + hapus ────────────────────────── */
+  /* ── Test write + delete ────────────────────────────────── */
 
-  const testName = "__alhaytham_test_file__.txt";
-  const alreadyExists = filesInFolder.find((f) => f.name === testName);
+  console.log("\n=== Menguji tulis + hapus ===\n");
+
+  const testName = "__alhaytham_test__.txt";
+  const boundary = `alhaytham_verify_${Date.now()}`;
+  const meta = JSON.stringify({ name: testName, parents: [folderId], mimeType: "text/plain" });
+  const body = Buffer.from(
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n--${boundary}\r\nContent-Type: text/plain\r\n\r\nOK — file ini dibuat otomatis oleh verify-google-drive.mjs.\r\n--${boundary}--\r\n`
+  );
 
   try {
-    const boundary = `alhaytham_test_${Date.now()}`;
-    const metadata = JSON.stringify({ name: testName, parents: [folderId], mimeType: "text/plain" });
-    const body = Buffer.from(
-      `--${boundary}\r\n` +
-        `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
-        `${metadata}\r\n` +
-        `--${boundary}\r\n` +
-        `Content-Type: text/plain\r\n\r\n` +
-        `OK — file ini dibuat otomatis oleh verify-google-drive.mjs.\r\n` +
-        `--${boundary}--\r\n`
-    );
-
-    let fileId;
-    if (alreadyExists) {
-      const res = await fetch(`${DRIVE_UPLOAD}/${alreadyExists.id}?uploadType=multipart`, {
-        method: "PATCH",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": `multipart/related; boundary=${boundary}`,
-        },
-        body,
-      });
-      if (!res.ok) throw new Error("PATCH gagal");
-      fileId = alreadyExists.id;
-    } else {
-      const res = await fetch(`${DRIVE_UPLOAD}?uploadType=multipart`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": `multipart/related; boundary=${boundary}`,
-        },
-        body,
-      });
-      if (!res.ok) {
-        const detail = await res.text();
-        throw new Error(`${res.status}: ${detail.slice(0, 200)}`);
-      }
-      const data = await res.json();
-      fileId = data.id;
+    const res = await fetch(`${DRIVE_UPLOAD}?uploadType=multipart`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": `multipart/related; boundary=${boundary}` },
+      body,
+    });
+    if (!res.ok) {
+      const d = await res.text();
+      throw new Error(`${res.status}: ${d.slice(0, 300)}`);
     }
+    const file = await res.json();
+    console.log(`✅ File tes berhasil dibuat: ${testName} (${file.id})`);
 
-    console.log(`✅ File tes berhasil ${alreadyExists ? "diperbarui" : "dibuat"}: __alhaytham_test_file__.txt`);
-
-    // Hapus file tes (clean up)
-    await fetch(`${DRIVE_API}/${fileId}`, {
+    // Cleanup
+    const del = await fetch(`${DRIVE_API}/${file.id}`, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${token}` },
     });
-
-    console.log("✅ File tes berhasil dihapus (semua izin OK).");
+    if (del.ok || del.status === 404) console.log("✅ File tes berhasil dihapus.");
+    else console.log("⚠️  File tes gagal dihapus (tidak kritis).");
   } catch (err) {
     console.log(`❌ Tes tulis/hapus gagal: ${err.message}`);
-    console.log("\n   Pastikan service account punya izin Editor di folder.");
     process.exit(1);
   }
 
