@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type * as pdfjsLib from "pdfjs-dist";
+import * as api from "../lib/api";
 
 type IconName =
   | "grid"
@@ -77,6 +78,51 @@ const SUPPORTED_EBOOK_FORMATS = ["PDF", "EPUB", "MOBI"] as const;
 function formatFileSize(bytes: number) {
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1).replace(".", ",")} MB`;
+}
+
+async function compressImageFile(file: File, maxDimension = 1600, quality = 0.82) {
+  if (!file.type.startsWith("image/")) return file;
+  try {
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, maxDimension / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const context = canvas.getContext("2d");
+    if (!context) return file;
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    bitmap.close();
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/webp", quality));
+    if (!blob) return file;
+    return new File([blob], `${file.name.replace(/\\.[^.]+$/, "")}.webp`, { type: "image/webp", lastModified: Date.now() });
+  } catch {
+    return file;
+  }
+}
+
+async function dataUrlToBlob(dataUrl: string) {
+  return (await fetch(dataUrl)).blob();
+}
+
+async function storeLibraryFile(id: string, file: File, compressLocal = false) {
+  const optimized = file.type.startsWith("image/") ? await compressImageFile(file) : file;
+  await saveBrowserFile(id, optimized, compressLocal && !optimized.type.startsWith("image/"));
+  if (api.isRemoteConfigured()) await api.uploadFile(id, optimized, file.name);
+  return optimized;
+}
+
+async function moveAvatarToRemote(id: string, dataUrl?: string) {
+  if (!dataUrl || !api.isRemoteConfigured() || !dataUrl.startsWith("data:")) return dataUrl;
+  await api.uploadFile(id, await dataUrlToBlob(dataUrl), "avatar.jpg");
+  return api.fileUrl(id);
+}
+
+async function loadLibraryFile(id: string) {
+  const local = await loadBrowserFile(id).catch(() => null);
+  if (local || !api.isRemoteConfigured()) return local;
+  const remote = await api.downloadFile(id);
+  if (remote) void saveBrowserFile(id, remote).catch(() => undefined);
+  return remote;
 }
 
 function openFileDatabase() {
@@ -340,6 +386,32 @@ const initialCategories = ["Fiksi", "Pendidikan", "Pengembangan Diri", "Non-fiks
 const initialClasses = ["X IPS 1", "XI IPA 2", "XII IPA 1", "XI IPS 2"];
 type MemberRole = "Admin" | "Guru" | "Siswa";
 type Member = { name: string; code: string; className: string; joined: string; status: string; initials: string; color: string; role: MemberRole; username: string; password: string; avatarData?: string; avatarName?: string };
+
+async function migrateLocalFilesToDrive(books: Book[], ebooks: EBook[], members: Member[], updateMembers: (members: Member[]) => void) {
+  if (!api.isRemoteConfigured()) return;
+  let nextMembers = members;
+  for (const item of books) {
+    if (!item.coverId) continue;
+    const local = await loadBrowserFile(item.coverId).catch(() => null);
+    if (!local) continue;
+    const file = new File([local], item.coverName ?? "cover", { type: local.type || "image/jpeg" });
+    const optimized = await compressImageFile(file);
+    await api.uploadFile(item.coverId, optimized, item.coverName ?? optimized.name);
+  }
+  for (const item of ebooks) {
+    if (!item.fileId) continue;
+    const local = await loadBrowserFile(item.fileId).catch(() => null);
+    if (local) await api.uploadFile(item.fileId, local, item.fileName ?? "ebook");
+  }
+  for (const member of members) {
+    if (!member.avatarData?.startsWith("data:")) continue;
+    const remoteMember = { ...member, avatarData: await moveAvatarToRemote(`member-avatar:${member.code}`, member.avatarData) };
+    await api.updateMember(remoteMember);
+    nextMembers = nextMembers.map((item) => item.code === member.code ? remoteMember : item);
+    updateMembers(nextMembers);
+  }
+}
+
 type LoanStatus = "Dipinjam" | "Terlambat" | "Dikembalikan";
 type Loan = { id: string; member: string; memberCode: string; book: string; bookCode: string; borrowed: string; borrowedDate?: string; due: string; dueDate?: string; returnedDate?: string; status: LoanStatus; avatar: string; color: string; avatarData?: string };
 
@@ -587,7 +659,7 @@ function BookCover({ book, small = false }: { book: Pick<Book, "initials" | "col
     let active = true;
     let objectUrl = "";
     if (book.coverId) {
-      loadBrowserFile(book.coverId).then((blob) => {
+      loadLibraryFile(book.coverId).then((blob) => {
         if (!active || !blob) return;
         objectUrl = URL.createObjectURL(blob);
         setCoverUrl(objectUrl);
@@ -608,7 +680,7 @@ function EbookCover({ ebook }: { ebook: EBook }) {
   useEffect(() => {
     let active = true;
     if (ebook.fileId && ebook.format === "PDF") {
-      loadBrowserFile(ebook.fileId).then((blob) => {
+      loadLibraryFile(ebook.fileId).then((blob) => {
         if (!active || !blob) return null;
         return getPdfCover(ebook.fileId as string, blob);
       }).then((dataUrl) => {
@@ -753,7 +825,7 @@ function EBooksPage({ ebooks, categories, onAdd, storageWarning, isAdmin, onRead
     setBusyFile(ebook.fileId);
     setFileNotice("");
     try {
-      const blob = await loadBrowserFile(ebook.fileId);
+      const blob = await loadLibraryFile(ebook.fileId);
       if (!blob) throw new Error("File tidak ditemukan");
       const objectUrl = URL.createObjectURL(blob);
       const link = document.createElement("a");
@@ -770,7 +842,7 @@ function EBooksPage({ ebooks, categories, onAdd, storageWarning, isAdmin, onRead
     }
   };
 
-  return <><PageHeader title="Katalog E-Book" description="Temukan koleksi digital yang dapat dibaca kapan saja. File besar tersimpan di browser." action={<button className="button button-primary" onClick={onAdd}><Icon name="plus" size={17} /> Tambah E-Book</button>} /><div className="toolbar"><label className="search-box"><Icon name="search" size={18} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Cari judul, penulis, atau kategori..." /></label><div className="filter-control"><button className={`button button-outline ${activeFilterCount > 0 ? "filter-active" : ""}`} aria-expanded={filterOpen} onClick={() => setFilterOpen((open) => !open)}><Icon name="filter" size={16} /> Filter{activeFilterCount > 0 && <span className="filter-count">{activeFilterCount}</span>}</button>{filterOpen && <div className="filter-panel" role="dialog" aria-label="Filter Katalog E-Book"><div className="filter-panel-header"><strong>Filter E-Book</strong><button type="button" className="text-button" onClick={resetFilters}>Reset</button></div><label className="filter-field">Kategori<select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}><option value="">Semua kategori</option>{categories.map((category) => <option key={category} value={category}>{category}</option>)}</select></label><label className="filter-field">Format<select value={formatFilter} onChange={(event) => setFormatFilter(event.target.value)}><option value="">Semua format</option><option value="PDF">PDF</option><option value="EPUB">EPUB</option><option value="MOBI">MOBI</option></select></label><button type="button" className="button button-primary filter-done" onClick={() => setFilterOpen(false)}>Terapkan</button></div>}</div><button className="button button-outline"><Icon name="download" size={16} /> Export</button></div>{(storageWarning || fileNotice) && <div className="form-error storage-warning"><Icon name="alert" size={16} />{storageWarning || fileNotice}</div>}<div className="book-grid">{filtered.map((ebook) => <article className="book-card ebook-card" key={ebook.code}><div className="book-card-cover"><EbookCover ebook={ebook} /><span className="stock-label">{ebook.format}</span></div><div className="book-card-body"><div className="book-category">{ebook.category}</div><h3>{ebook.title}</h3><p>{ebook.author}</p>{ebook.fileName && <span className="ebook-file" title={ebook.fileName}>📎 {ebook.fileName}</span>}<div className="book-meta"><span>{ebook.format} · {ebook.size}</span>{isAdmin && <div className="ebook-menu-wrap"><button className="icon-button subtle" aria-label={`Opsi ${ebook.title}`} aria-expanded={menuOpenFor === ebook.code} onClick={(event) => { event.stopPropagation(); setMenuOpenFor(menuOpenFor === ebook.code ? "" : ebook.code); }}><Icon name="more" size={17} /></button>{menuOpenFor === ebook.code && <div className="ebook-menu" role="menu"><button role="menuitem" onClick={() => { setMenuOpenFor(""); onEdit(ebook); }}><Icon name="edit" size={15} /> Edit</button><button role="menuitem" className="danger" onClick={() => { setMenuOpenFor(""); onDelete(ebook); }}><Icon name="trash" size={15} /> Hapus</button></div>}</div>}</div>{ebook.fileId && <div className="ebook-actions"><button className="button button-outline" onClick={() => handleRead(ebook)} disabled={busyFile === ebook.fileId}><Icon name="book" size={14} /> Baca</button><button className="button button-outline" onClick={() => handleDownload(ebook)} disabled={busyFile === ebook.fileId}><Icon name="download" size={14} /> Download</button></div>}</div></article>)}</div>{filtered.length === 0 && <div className="empty-state"><Icon name="search" size={30} /><h3>E-Book tidak ditemukan</h3><p>Coba gunakan kata kunci pencarian lain.</p></div>}</>;
+  return <><PageHeader title="Katalog E-Book" description="Temukan koleksi digital yang dapat dibaca kapan saja. File tersimpan aman di Google Drive." action={<button className="button button-primary" onClick={onAdd}><Icon name="plus" size={17} /> Tambah E-Book</button>} /><div className="toolbar"><label className="search-box"><Icon name="search" size={18} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Cari judul, penulis, atau kategori..." /></label><div className="filter-control"><button className={`button button-outline ${activeFilterCount > 0 ? "filter-active" : ""}`} aria-expanded={filterOpen} onClick={() => setFilterOpen((open) => !open)}><Icon name="filter" size={16} /> Filter{activeFilterCount > 0 && <span className="filter-count">{activeFilterCount}</span>}</button>{filterOpen && <div className="filter-panel" role="dialog" aria-label="Filter Katalog E-Book"><div className="filter-panel-header"><strong>Filter E-Book</strong><button type="button" className="text-button" onClick={resetFilters}>Reset</button></div><label className="filter-field">Kategori<select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}><option value="">Semua kategori</option>{categories.map((category) => <option key={category} value={category}>{category}</option>)}</select></label><label className="filter-field">Format<select value={formatFilter} onChange={(event) => setFormatFilter(event.target.value)}><option value="">Semua format</option><option value="PDF">PDF</option><option value="EPUB">EPUB</option><option value="MOBI">MOBI</option></select></label><button type="button" className="button button-primary filter-done" onClick={() => setFilterOpen(false)}>Terapkan</button></div>}</div><button className="button button-outline"><Icon name="download" size={16} /> Export</button></div>{(storageWarning || fileNotice) && <div className="form-error storage-warning"><Icon name="alert" size={16} />{storageWarning || fileNotice}</div>}<div className="book-grid">{filtered.map((ebook) => <article className="book-card ebook-card" key={ebook.code}><div className="book-card-cover"><EbookCover ebook={ebook} /><span className="stock-label">{ebook.format}</span></div><div className="book-card-body"><div className="book-category">{ebook.category}</div><h3>{ebook.title}</h3><p>{ebook.author}</p>{ebook.fileName && <span className="ebook-file" title={ebook.fileName}>📎 {ebook.fileName}</span>}<div className="book-meta"><span>{ebook.format} · {ebook.size}</span>{isAdmin && <div className="ebook-menu-wrap"><button className="icon-button subtle" aria-label={`Opsi ${ebook.title}`} aria-expanded={menuOpenFor === ebook.code} onClick={(event) => { event.stopPropagation(); setMenuOpenFor(menuOpenFor === ebook.code ? "" : ebook.code); }}><Icon name="more" size={17} /></button>{menuOpenFor === ebook.code && <div className="ebook-menu" role="menu"><button role="menuitem" onClick={() => { setMenuOpenFor(""); onEdit(ebook); }}><Icon name="edit" size={15} /> Edit</button><button role="menuitem" className="danger" onClick={() => { setMenuOpenFor(""); onDelete(ebook); }}><Icon name="trash" size={15} /> Hapus</button></div>}</div>}</div>{ebook.fileId && <div className="ebook-actions"><button className="button button-outline" onClick={() => handleRead(ebook)} disabled={busyFile === ebook.fileId}><Icon name="book" size={14} /> Baca</button><button className="button button-outline" onClick={() => handleDownload(ebook)} disabled={busyFile === ebook.fileId}><Icon name="download" size={14} /> Download</button></div>}</div></article>)}</div>{filtered.length === 0 && <div className="empty-state"><Icon name="search" size={30} /><h3>E-Book tidak ditemukan</h3><p>Coba gunakan kata kunci pencarian lain.</p></div>}</>;
 }
 
 async function resolveOutline(doc: pdfjsLib.PDFDocumentProxy, nodes: PdfOutlineNode[]): Promise<TocEntry[]> {
@@ -981,7 +1053,7 @@ function FlipbookReader({ ebook, onClose }: { ebook: EBook; onClose: () => void 
     (async () => {
       try {
         if (!ebook.fileId) throw new Error("File E-Book belum tersedia.");
-        const blob = await loadBrowserFile(ebook.fileId);
+        const blob = await loadLibraryFile(ebook.fileId);
         if (!blob) throw new Error("File E-Book tidak ditemukan.");
         const data = new Uint8Array(await blob.arrayBuffer());
         const pdfjs = await getPdfjsModule();
@@ -1262,7 +1334,7 @@ function AddEbookModal({ nextCode, categories, onClose, onAdd }: { nextCode: str
     }
   };
 
-  return <div className="modal-backdrop" role="presentation" onClick={onClose}><div className="modal" role="dialog" aria-modal="true" aria-labelledby="ebook-title" onClick={(event) => event.stopPropagation()}><div className="modal-header"><div><span className="eyebrow">KOLEKSI DIGITAL BARU</span><h2 id="ebook-title">Tambah E-Book</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Tutup"><Icon name="close" size={20} /></button></div><form onSubmit={submit}><div className="form-grid ebook-form"><label className="form-span">Judul E-Book<input value={title} onChange={(event) => { setTitle(event.target.value); setError(""); }} placeholder="Contoh: Si Kancil dan Buaya" /></label><label>Penulis<input value={author} onChange={(event) => { setAuthor(event.target.value); setError(""); }} placeholder="Contoh: Tim Penerbit" /></label><label>Kategori<select value={category} onChange={(event) => { setCategory(event.target.value); setError(""); }}><option value="">Pilih kategori</option>{categories.map((item) => <option key={item} value={item}>{item}</option>)}</select></label><label>Format<select value={format} onChange={(event) => setFormat(event.target.value)}><option value="PDF">PDF</option><option value="EPUB">EPUB</option><option value="MOBI">MOBI</option></select></label><label className="form-span file-upload-label">File E-Book<input className="file-input" type="file" accept=".pdf,.epub,.mobi,application/pdf,application/epub+zip,application/x-mobipocket-ebook" onChange={handleFileChange} /><span className="file-upload-box"><Icon name="download" size={17} /><span>{file ? file.name : "Pilih file PDF, EPUB, atau MOBI"}<small>{file ? `${size} · tersimpan di IndexedDB` : "Ukuran besar didukung · tersimpan di IndexedDB"}</small></span></span></label></div>{error && <div className="form-error"><Icon name="alert" size={16} />{error}</div>}<div className="modal-actions"><button type="button" className="button button-outline" onClick={onClose}>Batal</button><button type="submit" className="button button-primary" disabled={saving}>{saving ? "Menyimpan..." : "Tambah E-Book"}</button></div></form></div></div>;
+  return <div className="modal-backdrop" role="presentation" onClick={onClose}><div className="modal" role="dialog" aria-modal="true" aria-labelledby="ebook-title" onClick={(event) => event.stopPropagation()}><div className="modal-header"><div><span className="eyebrow">KOLEKSI DIGITAL BARU</span><h2 id="ebook-title">Tambah E-Book</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Tutup"><Icon name="close" size={20} /></button></div><form onSubmit={submit}><div className="form-grid ebook-form"><label className="form-span">Judul E-Book<input value={title} onChange={(event) => { setTitle(event.target.value); setError(""); }} placeholder="Contoh: Si Kancil dan Buaya" /></label><label>Penulis<input value={author} onChange={(event) => { setAuthor(event.target.value); setError(""); }} placeholder="Contoh: Tim Penerbit" /></label><label>Kategori<select value={category} onChange={(event) => { setCategory(event.target.value); setError(""); }}><option value="">Pilih kategori</option>{categories.map((item) => <option key={item} value={item}>{item}</option>)}</select></label><label>Format<select value={format} onChange={(event) => setFormat(event.target.value)}><option value="PDF">PDF</option><option value="EPUB">EPUB</option><option value="MOBI">MOBI</option></select></label><label className="form-span file-upload-label">File E-Book<input className="file-input" type="file" accept=".pdf,.epub,.mobi,application/pdf,application/epub+zip,application/x-mobipocket-ebook" onChange={handleFileChange} /><span className="file-upload-box"><Icon name="download" size={17} /><span>{file ? file.name : "Pilih file PDF, EPUB, atau MOBI"}<small>{file ? `${size} · tersimpan di Google Drive + cache lokal` : "Ukuran besar didukung · tersimpan di Google Drive"}</small></span></span></label></div>{error && <div className="form-error"><Icon name="alert" size={16} />{error}</div>}<div className="modal-actions"><button type="button" className="button button-outline" onClick={onClose}>Batal</button><button type="submit" className="button button-primary" disabled={saving}>{saving ? "Menyimpan..." : "Tambah E-Book"}</button></div></form></div></div>;
 }
 
 function AddBookModal({ nextCode, categories, onClose, onAdd }: { nextCode: string; categories: string[]; onClose: () => void; onAdd: (book: Book, cover?: File) => Promise<void> }) {
@@ -1951,98 +2023,56 @@ export default function LibraryApp() {
   const [catalogHydrated, setCatalogHydrated] = useState(false);
   const [storageWarning, setStorageWarning] = useState("");
   const [avatarShape, setAvatarShape] = useState<"round" | "square">("round");
-  const persistTimerRef = useRef(0);
 
   useEffect(() => {
     let active = true;
     const hydrateCatalog = async () => {
       try {
-        const [storedEbooks, storedBooks, storedCategories, storedMembers, storedClasses, storedLoans, storedProfile, storedAvatarShape] = await Promise.all([
-          readAppData(EBOOK_STORAGE_KEY),
-          readAppData(BOOK_STORAGE_KEY),
-          readAppData(CATEGORY_STORAGE_KEY),
-          readAppData(MEMBERS_STORAGE_KEY),
-          readAppData(CLASSES_STORAGE_KEY),
-          readAppData(LOANS_STORAGE_KEY),
-          readAppData(PROFILE_STORAGE_KEY),
-          readAppData(AVATAR_SHAPE_STORAGE_KEY),
+        const API_URL = process.env.NEXT_PUBLIC_API_URL;
+        if (!API_URL) {
+          // No remote API configured — use initial/seeded data (offline mode).
+          if (active) {
+            setCatalogHydrated(true);
+          }
+          return;
+        }
+        const [remoteEbooks, remoteBooks, remoteMembers, remoteLoans, remoteCategories, remoteClasses, remoteProfile, storedAvatarShape] = await Promise.all([
+          api.fetchEbooks(),
+          api.fetchBooks(),
+          api.fetchMembers(),
+          api.fetchLoans(),
+          api.fetchCategories(),
+          api.fetchClasses(),
+          api.fetchProfile().catch(() => null),
+          api.fetchSetting("avatar-shape").catch(() => null),
         ]);
-        let nextEbooks = initialEbooks;
-        let nextMembers = initialMembers;
-        let nextLoans = initialLoans;
-        let nextClasses = initialClasses;
-        let nextCategories = initialCategories;
-        if (storedEbooks) {
-          try {
-            const parsedEbooks = JSON.parse(storedEbooks);
-            if (Array.isArray(parsedEbooks)) {
-              nextEbooks = await Promise.all(parsedEbooks.map(async (ebook: EBook) => {
-                if (ebook.fileData && !ebook.fileId) {
-                  const fileId = `ebook:${ebook.code}`;
-                  try {
-                    await migrateLegacyFile(fileId, ebook.fileData);
-                    const { fileData: _legacyFileData, ...metadata } = ebook;
-                    return { ...metadata, fileId };
-                  } catch {
-                    return ebook;
-                  }
-                }
-                return ebook;
-              }));
-            }
-          } catch {
-            // Daftar E-Book tidak dapat dibaca; katalog awal dipakai sementara tanpa menimpa data.
-          }
-        }
-        let nextBooks = initialBooks;
-        if (storedBooks) {
-          const parsedBooks = JSON.parse(storedBooks);
-          if (Array.isArray(parsedBooks)) nextBooks = parsedBooks;
-        }
-        if (storedMembers) {
-          const parsedMembers = JSON.parse(storedMembers);
-          if (Array.isArray(parsedMembers)) nextMembers = parsedMembers;
-        }
-        if (storedClasses) {
-          const parsedClasses = JSON.parse(storedClasses);
-          if (Array.isArray(parsedClasses)) {
-            const customClasses = parsedClasses.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
-            nextClasses = Array.from(new Set(customClasses));
-          }
-        }
-        if (storedLoans) {
-          const parsedLoans = JSON.parse(storedLoans);
-          if (Array.isArray(parsedLoans)) nextLoans = parsedLoans;
-        }
-        if (storedCategories) {
-          const parsedCategories = JSON.parse(storedCategories);
-          if (Array.isArray(parsedCategories)) {
-            const customCategories = parsedCategories.filter((category): category is string => typeof category === "string" && category.trim().length > 0);
-            nextCategories = Array.from(new Set([...initialCategories, ...customCategories]));
-          }
-        }
         if (active) {
-          setEbooksList(nextEbooks);
-          setBooksList(nextBooks);
-          setMembersList(nextMembers);
-          setLoansList(nextLoans);
-          if (storedProfile) {
-            try {
-              const parsedProfile = JSON.parse(storedProfile);
-              if (parsedProfile && typeof parsedProfile === "object") setProfile((current) => ({ ...current, ...parsedProfile }));
-            } catch {
-              // Profil tidak dapat dibaca; profil saat ini tetap digunakan.
-            }
-          }
-          setClasses(nextClasses);
-          setCategories(nextCategories);
+          const clean = <T extends Record<string, unknown>>(rows: T[]): T[] =>
+            rows.map((row) => Object.fromEntries(Object.entries(row).map(([k, v]) => [k, v === null ? undefined : v])) as T);
+          setEbooksList(remoteEbooks.length > 0 ? clean(remoteEbooks) : initialEbooks);
+          setBooksList(remoteBooks.length > 0 ? clean(remoteBooks) : initialBooks);
+          setMembersList(remoteMembers.length > 0 ? clean(remoteMembers) : initialMembers);
+          setLoansList(remoteLoans.length > 0 ? clean(remoteLoans).map((l) => ({ ...l, status: l.status as LoanStatus })) : initialLoans);
+          setCategories(remoteCategories.length > 0 ? remoteCategories : initialCategories);
+          setClasses(remoteClasses.length > 0 ? remoteClasses : initialClasses);
+          if (remoteProfile) setProfile((current) => ({ ...current, ...clean([remoteProfile])[0] }));
           if (storedAvatarShape === "square" || storedAvatarShape === "round") setAvatarShape(storedAvatarShape);
+          void migrateLocalFilesToDrive(remoteBooks, remoteEbooks, remoteMembers, (nextMembers) => setMembersList(nextMembers)).catch(() => undefined);
+          if (remoteProfile?.avatarData?.startsWith("data:")) {
+            void (async () => {
+              const avatarData = await moveAvatarToRemote("profile-avatar", remoteProfile.avatarData);
+              await api.updateProfile({ ...remoteProfile, avatarData });
+              setProfile((current) => ({ ...current, avatarData }));
+            })().catch(() => undefined);
+          }
           setCatalogHydrated(true);
-          void cleanupLegacyStorage();
         }
       } catch {
-        // Data lokal tidak dapat dibaca: jangan menimpa data tersimpan dengan katalog awal.
-        if (active) setStorageWarning("Data katalog lokal tidak dapat dibaca. Perubahan tidak akan disimpan hingga data terbaca kembali.");
+        // Remote API unreachable — fall back to initial/seeded data.
+        if (active) {
+          setStorageWarning("API tidak dapat diakses. Menggunakan data awal.");
+          setCatalogHydrated(true);
+        }
       }
     };
     hydrateCatalog();
@@ -2059,40 +2089,19 @@ export default function LibraryApp() {
     return () => window.removeEventListener("load", registerServiceWorker);
   }, []);
 
+  // Persist avatar shape to remote
   useEffect(() => {
     if (!catalogHydrated) return;
-    const ebookMetadata = ebooksList.map(({ fileData: _legacyFileData, ...metadata }) => metadata);
-    const bookMetadata = booksList.map(({ coverData: _legacyCoverData, ...metadata }) => metadata);
-    const payload: Record<string, string> = {
-      [EBOOK_STORAGE_KEY]: JSON.stringify(ebookMetadata),
-      [BOOK_STORAGE_KEY]: JSON.stringify(bookMetadata),
-      [MEMBERS_STORAGE_KEY]: JSON.stringify(membersList),
-      [LOANS_STORAGE_KEY]: JSON.stringify(loansList),
-      [PROFILE_STORAGE_KEY]: JSON.stringify(profile),
-      [CLASSES_STORAGE_KEY]: JSON.stringify(classes),
-      [CATEGORY_STORAGE_KEY]: JSON.stringify(categories),
-      [AVATAR_SHAPE_STORAGE_KEY]: avatarShape,
-    };
-    window.clearTimeout(persistTimerRef.current);
-    persistTimerRef.current = window.setTimeout(() => {
-      void (async () => {
-        try {
-          for (const [key, value] of Object.entries(payload)) {
-            await writeAppData(key, value);
-          }
-          setStorageWarning("");
-        } catch {
-          setStorageWarning("Data tampil di sesi ini, tetapi penyimpanan lokal gagal menyimpan perubahan.");
-        }
-      })();
-    }, 300);
-    return () => window.clearTimeout(persistTimerRef.current);
-  }, [ebooksList, booksList, membersList, loansList, classes, categories, profile, avatarShape, catalogHydrated]);
+    const API_URL = process.env.NEXT_PUBLIC_API_URL;
+    if (!API_URL) return;
+    void api.saveSetting("avatar-shape", avatarShape).catch(() => undefined);
+  }, [avatarShape, catalogHydrated]);
 
   const addCategory = (name: string) => {
     const normalized = name.trim();
     if (!normalized || categories.some((category) => category.toLowerCase() === normalized.toLowerCase())) return false;
     setCategories((current) => [...current, normalized]);
+    if (process.env.NEXT_PUBLIC_API_URL) void api.createCategory(normalized).catch(() => undefined);
     return true;
   };
 
@@ -2100,17 +2109,20 @@ export default function LibraryApp() {
     const used = [...booksList, ...ebooksList].some((item) => item.category.toLowerCase() === name.toLowerCase());
     if (used) return false;
     setCategories((current) => current.filter((category) => category !== name));
+    if (process.env.NEXT_PUBLIC_API_URL) void api.deleteCategory(name).catch(() => undefined);
     return true;
   };
 
   const addEbook = async (ebook: EBook, file: File) => {
-    await saveBrowserFile(ebook.fileId!, file, true);
+    await storeLibraryFile(ebook.fileId!, file, true);
+    if (api.isRemoteConfigured()) await api.createEbook(ebook);
     setEbooksList((current) => [...current, ebook]);
     setEbookModalOpen(false);
   };
 
   const updateEbook = async (nextEbook: EBook, file?: File) => {
-    if (file && nextEbook.fileId) await saveBrowserFile(nextEbook.fileId, file, true);
+    if (file && nextEbook.fileId) await storeLibraryFile(nextEbook.fileId, file, true);
+    if (api.isRemoteConfigured()) await api.updateEbook(nextEbook);
     setEbooksList((current) => current.map((ebook) => ebook.code === nextEbook.code ? nextEbook : ebook));
     setEbookToEdit(null);
   };
@@ -2123,20 +2135,24 @@ export default function LibraryApp() {
       } catch {
         // Lanjutkan menghapus metadata meskipun file sudah tidak ada.
       }
+      if (api.isRemoteConfigured()) await api.deleteFile(ebook.fileId).catch(() => undefined);
     }
     clearReadingProgress(ebook.code);
+    if (api.isRemoteConfigured()) await api.deleteEbook(ebook.code);
     setEbooksList((current) => current.filter((item) => item.code !== ebook.code));
     setEbookToEdit((current) => current?.code === ebook.code ? null : current);
   };
 
   const addBook = async (book: Book, cover?: File) => {
-    if (cover && book.coverId) await saveBrowserFile(book.coverId, cover);
+    if (cover && book.coverId) await storeLibraryFile(book.coverId, cover);
+    if (api.isRemoteConfigured()) await api.createBook(book);
     setBooksList((current) => [...current, book]);
     setBookModalOpen(false);
   };
 
   const updateBook = async (nextBook: Book, cover?: File) => {
-    if (cover && nextBook.coverId) await saveBrowserFile(nextBook.coverId, cover);
+    if (cover && nextBook.coverId) await storeLibraryFile(nextBook.coverId, cover);
+    if (api.isRemoteConfigured()) await api.updateBook(nextBook);
     setBooksList((current) => current.map((book) => book.code === nextBook.code ? nextBook : book));
     setBookToEdit(null);
   };
@@ -2154,13 +2170,22 @@ export default function LibraryApp() {
       } catch {
         // Lanjutkan menghapus metadata meskipun file cover sudah tidak ada.
       }
+      if (api.isRemoteConfigured()) await api.deleteFile(book.coverId).catch(() => undefined);
     }
+    if (api.isRemoteConfigured()) await api.deleteBook(book.code);
     setBooksList((current) => current.filter((item) => item.code !== book.code));
     setBookToEdit((current) => current?.code === book.code ? null : current);
   };
 
   const addMember = (member: Member) => {
     setMembersList((current) => [...current, member]);
+    if (api.isRemoteConfigured()) {
+      void (async () => {
+        const remoteMember = { ...member, avatarData: await moveAvatarToRemote(`member-avatar:${member.code}`, member.avatarData) };
+        await api.createMember(remoteMember);
+        setMembersList((current) => current.map((item) => item.code === member.code ? remoteMember : item));
+      })().catch(() => undefined);
+    }
     setMemberModalOpen(false);
   };
 
@@ -2193,13 +2218,34 @@ export default function LibraryApp() {
       workingMembers.push(member);
       addedMembers.push(member);
     });
-    if (addedMembers.length > 0) setMembersList((current) => [...current, ...addedMembers]);
+    if (addedMembers.length > 0) {
+      setMembersList((current) => [...current, ...addedMembers]);
+      if (api.isRemoteConfigured()) {
+        void (async () => {
+          for (const member of addedMembers) {
+            const remoteMember = { ...member, avatarData: await moveAvatarToRemote(`member-avatar:${member.code}`, member.avatarData) };
+            await api.createMember(remoteMember);
+            setMembersList((current) => current.map((item) => item.code === member.code ? remoteMember : item));
+          }
+        })().catch(() => undefined);
+      }
+    }
     return { added: addedMembers.length, errors };
   };
 
   const updateMember = (nextMember: Member) => {
+    const previousMember = membersList.find((member) => member.code === nextMember.code);
     setMembersList((current) => current.map((member) => member.code === nextMember.code ? nextMember : member));
     setLoansList((current) => current.map((loan) => loan.memberCode === nextMember.code ? { ...loan, member: nextMember.name, avatar: nextMember.initials, color: nextMember.color, avatarData: nextMember.avatarData } : loan));
+    if (api.isRemoteConfigured()) {
+      void (async () => {
+        if (!nextMember.avatarData && previousMember?.avatarData) await api.deleteFile(`member-avatar:${nextMember.code}`).catch(() => undefined);
+        const remoteMember = { ...nextMember, avatarData: await moveAvatarToRemote(`member-avatar:${nextMember.code}`, nextMember.avatarData) };
+        await api.updateMember(remoteMember);
+        setMembersList((current) => current.map((member) => member.code === nextMember.code ? remoteMember : member));
+        setLoansList((current) => current.map((loan) => loan.memberCode === nextMember.code ? { ...loan, avatarData: remoteMember.avatarData } : loan));
+      })().catch(() => undefined);
+    }
     setMemberToEdit(null);
   };
 
@@ -2207,22 +2253,28 @@ export default function LibraryApp() {
     const normalized = name.trim();
     if (!normalized || classes.some((item) => item.toLowerCase() === normalized.toLowerCase())) return false;
     setClasses((current) => [...current, normalized]);
+    if (process.env.NEXT_PUBLIC_API_URL) void api.createClass(normalized).catch(() => undefined);
     return true;
   };
 
   const deleteClass = (name: string) => {
     if (membersList.some((member) => member.role === "Siswa" && member.className.toLowerCase() === name.toLowerCase())) return false;
     setClasses((current) => current.filter((item) => item !== name));
+    if (process.env.NEXT_PUBLIC_API_URL) void api.deleteClass(name).catch(() => undefined);
     return true;
   };
 
-  const deleteMember = (member: Member) => {
+  const deleteMember = async (member: Member) => {
     const hasActiveLoan = loansList.some((loan) => loan.memberCode === member.code && getLoanStatus(loan) !== "Dikembalikan");
     if (hasActiveLoan) {
       window.alert(`Anggota “${member.name}” masih memiliki peminjaman aktif. Kembalikan bukunya terlebih dahulu.`);
       return;
     }
     if (!window.confirm(`Hapus anggota “${member.name}”? Riwayat transaksi yang sudah selesai tetap dipertahankan.`)) return;
+    if (api.isRemoteConfigured()) {
+      await api.deleteMember(member.code);
+      await api.deleteFile(`member-avatar:${member.code}`).catch(() => undefined);
+    }
     setMembersList((current) => current.filter((item) => item.code !== member.code));
     setMemberToEdit((current) => current?.code === member.code ? null : current);
   };
@@ -2234,6 +2286,10 @@ export default function LibraryApp() {
     const loan: Loan = { id: `loan-${Date.now()}`, member: member.name, memberCode: member.code, book: book.title, bookCode: book.code, borrowed: formatLoanDate(data.borrowedDate), borrowedDate: data.borrowedDate, due: formatLoanDate(data.dueDate), dueDate: data.dueDate, status: "Dipinjam", avatar: member.initials, color: member.color, avatarData: member.avatarData };
     setBooksList((current) => current.map((item) => item.code === book.code ? { ...item, available: item.available - 1 } : item));
     setLoansList((current) => [...current, loan]);
+    if (process.env.NEXT_PUBLIC_API_URL) {
+      void api.createLoan(loan).catch(() => undefined);
+      void api.updateBook({ code: book.code, available: book.available - 1 }).catch(() => undefined);
+    }
     setModalOpen(false);
     return true;
   };
@@ -2242,6 +2298,23 @@ export default function LibraryApp() {
     if (getLoanStatus(loan) === "Dikembalikan") return;
     setLoansList((current) => current.map((item) => item.id === loan.id ? { ...item, status: "Dikembalikan", returnedDate: dateInputValue() } : item));
     setBooksList((current) => current.map((item) => item.code === loan.bookCode ? { ...item, available: Math.min(item.stock, item.available + 1) } : item));
+    if (process.env.NEXT_PUBLIC_API_URL) {
+      void api.returnLoan(loan.id).catch(() => undefined);
+    }
+  };
+
+  const saveProfile = (nextProfile: ProfileData) => {
+    const hadAvatar = Boolean(profile.avatarData);
+    setProfile(nextProfile);
+    setProfileOpen(false);
+    if (api.isRemoteConfigured()) {
+      void (async () => {
+        if (!nextProfile.avatarData && hadAvatar) await api.deleteFile("profile-avatar").catch(() => undefined);
+        const remoteProfile = { ...nextProfile, avatarData: await moveAvatarToRemote("profile-avatar", nextProfile.avatarData) };
+        await api.updateProfile(remoteProfile);
+        setProfile((current) => ({ ...current, avatarData: remoteProfile.avatarData }));
+      })().catch(() => undefined);
+    }
   };
 
   const navigate = (page: PageKey) => { setActivePage(page); setSidebarOpen(false); setNotificationsOpen(false); };
@@ -2255,5 +2328,5 @@ export default function LibraryApp() {
 
   return <div className={`app-shell avatar-shape-${avatarShape}`}>
     <aside className={`sidebar ${sidebarOpen ? "sidebar-open" : ""}`}><div className="brand"><span className="brand-mark"><span /><span /><span /></span><span>Al-Haytham <span className="brand-accent">Library</span></span></div><div className="sidebar-label">MENU UTAMA</div><nav>{navItems.map((item) => <button key={item.key} className={`nav-item ${activePage === item.key ? "active" : ""}`} onClick={() => navigate(item.key)}><Icon name={item.icon} size={19} /><span>{item.label}</span>{item.key === "loans" && <em>{activeLoanCount}</em>}</button>)}</nav><div className="sidebar-label sidebar-secondary">LAINNYA</div><nav><button className={`nav-item ${activePage === "settings" ? "active" : ""}`} onClick={() => navigate("settings")}><Icon name="sliders" size={19} /><span>Pengaturan</span></button></nav><div className="sidebar-bottom"><div className="help-card"><div className="help-spark">✦</div><strong>Butuh bantuan?</strong><span>Pelajari cara menggunakan Al-Haytham Library.</span><button type="button" onClick={() => setGuideOpen(true)}>Mulai panduan <span>→</span></button></div>        <button className="user-card" onClick={() => setProfileOpen(true)} aria-label="Edit profil"><span className="avatar user-avatar">{profile.avatarData ? <img src={profile.avatarData} alt={`Foto ${profile.name}`} /> : getInitials(profile.name)}</span><span><b>{profile.name}</b><small>{profile.role === "student" ? "Siswa" : profile.detail}</small></span><Icon name="more" size={18} /></button></div></aside>
-    <main className="main-content"><header className="topbar"><button className="mobile-menu icon-button" onClick={() => setSidebarOpen(!sidebarOpen)} aria-label="Buka menu"><Icon name="menu" size={21} /></button><div className="breadcrumb"><span>Perpustakaan</span><b>/</b><strong>{pageTitle}</strong></div><div className="topbar-actions"><label className="top-search"><Icon name="search" size={17} /><input placeholder="Cari apa saja..." /></label><div className="notification-wrap"><button className="notification-button" aria-label="Notifikasi" aria-expanded={notificationsOpen} onClick={() => setNotificationsOpen(!notificationsOpen)}><Icon name="bell" size={20} /><span /></button>{notificationsOpen && <NotificationPanel onNavigate={navigate} onClose={() => setNotificationsOpen(false)} overdueCount={overdueLoanCount} lowStockCount={lowStockCount} />}</div><button className="top-avatar" onClick={() => setProfileOpen(true)} aria-label="Edit profil">{profile.avatarData ? <img src={profile.avatarData} alt={`Foto ${profile.name}`} /> : getInitials(profile.name)}</button></div></header><div key={activePage} className="page-content">{activePage === "overview" && <Overview booksList={booksList} ebooksList={ebooksList} membersList={membersList} loansList={loansList} onNavigate={navigate} onQuickLoan={() => setModalOpen(true)} />}{activePage === "ebooks" && <EBooksPage ebooks={ebooksList} categories={categories} onAdd={() => setEbookModalOpen(true)} storageWarning={storageWarning} isAdmin={profile.role === "staff"} onRead={(ebook) => setReadingEbook(ebook)} onEdit={(ebook) => setEbookToEdit(ebook)} onDelete={(ebook) => { void deleteEbook(ebook); }} />}{activePage === "books" && <BooksPage booksList={booksList} categories={categories} onAdd={() => setBookModalOpen(true)} isAdmin={profile.role === "staff"} onEdit={(book) => setBookToEdit(book)} onDelete={(book) => { void deleteBook(book); }} />}{activePage === "members" && <MembersPage membersList={membersList} classes={classes} onAdd={() => setMemberModalOpen(true)} onEdit={setMemberToEdit} onDelete={deleteMember} onAddClass={() => setClassModalOpen(true)} onImportStudents={() => setStudentImportOpen(true)} onDownloadTemplate={() => downloadStudentTemplate(classes)} />}{activePage === "loans" && <LoansPage loansList={loansList} onQuickLoan={() => setModalOpen(true)} onReturnLoan={returnLoan} />}{activePage === "settings" && <SettingsPage categories={categories} avatarShape={avatarShape} onAvatarShapeChange={setAvatarShape} onAddCategory={addCategory} onDeleteCategory={deleteCategory} />}</div></main>{modalOpen && <QuickLoanModal membersList={membersList} booksList={booksList} onClose={() => setModalOpen(false)} onAddLoan={addLoan} />}{ebookModalOpen && <AddEbookModal nextCode={nextEbookCode} categories={categories} onClose={() => setEbookModalOpen(false)} onAdd={addEbook} />}{ebookToEdit && <EditEbookModal ebook={ebookToEdit} categories={categories} onClose={() => setEbookToEdit(null)} onSave={updateEbook} />}{readingEbook && <FlipbookReader ebook={readingEbook} onClose={() => setReadingEbook(null)} />}{bookModalOpen && <AddBookModal nextCode={nextBookCode} categories={categories} onClose={() => setBookModalOpen(false)} onAdd={addBook} />}{bookToEdit && <EditBookModal book={bookToEdit} categories={categories} onClose={() => setBookToEdit(null)} onSave={updateBook} />}{memberModalOpen && <AddMemberModal nextCodes={nextMemberCodes} existingMembers={membersList} classes={classes} onClose={() => setMemberModalOpen(false)} onAdd={addMember} />}{memberToEdit && <EditMemberModal member={memberToEdit} existingMembers={membersList} classes={classes} onClose={() => setMemberToEdit(null)} onSave={updateMember} />}{classModalOpen && <AddClassModal classes={classes} onClose={() => setClassModalOpen(false)} onAdd={addClass} onDelete={deleteClass} />}{studentImportOpen && <ImportStudentsModal classes={classes} onClose={() => setStudentImportOpen(false)} onImport={importStudents} />}{guideOpen && <GuideModal onClose={() => setGuideOpen(false)} onNavigate={navigate} />}{profileOpen && <ProfileModal profile={profile} onClose={() => setProfileOpen(false)} onSave={(nextProfile) => { setProfile(nextProfile); setProfileOpen(false); }} onLogout={() => { if (window.confirm("Apakah Anda yakin ingin keluar?")) { localStorage.clear(); router.push("/login"); } }} />}</div>;
+    <main className="main-content"><header className="topbar"><button className="mobile-menu icon-button" onClick={() => setSidebarOpen(!sidebarOpen)} aria-label="Buka menu"><Icon name="menu" size={21} /></button><div className="breadcrumb"><span>Perpustakaan</span><b>/</b><strong>{pageTitle}</strong></div><div className="topbar-actions"><label className="top-search"><Icon name="search" size={17} /><input placeholder="Cari apa saja..." /></label><div className="notification-wrap"><button className="notification-button" aria-label="Notifikasi" aria-expanded={notificationsOpen} onClick={() => setNotificationsOpen(!notificationsOpen)}><Icon name="bell" size={20} /><span /></button>{notificationsOpen && <NotificationPanel onNavigate={navigate} onClose={() => setNotificationsOpen(false)} overdueCount={overdueLoanCount} lowStockCount={lowStockCount} />}</div><button className="top-avatar" onClick={() => setProfileOpen(true)} aria-label="Edit profil">{profile.avatarData ? <img src={profile.avatarData} alt={`Foto ${profile.name}`} /> : getInitials(profile.name)}</button></div></header><div key={activePage} className="page-content">{activePage === "overview" && <Overview booksList={booksList} ebooksList={ebooksList} membersList={membersList} loansList={loansList} onNavigate={navigate} onQuickLoan={() => setModalOpen(true)} />}{activePage === "ebooks" && <EBooksPage ebooks={ebooksList} categories={categories} onAdd={() => setEbookModalOpen(true)} storageWarning={storageWarning} isAdmin={profile.role === "staff"} onRead={(ebook) => setReadingEbook(ebook)} onEdit={(ebook) => setEbookToEdit(ebook)} onDelete={(ebook) => { void deleteEbook(ebook); }} />}{activePage === "books" && <BooksPage booksList={booksList} categories={categories} onAdd={() => setBookModalOpen(true)} isAdmin={profile.role === "staff"} onEdit={(book) => setBookToEdit(book)} onDelete={(book) => { void deleteBook(book); }} />}{activePage === "members" && <MembersPage membersList={membersList} classes={classes} onAdd={() => setMemberModalOpen(true)} onEdit={setMemberToEdit} onDelete={deleteMember} onAddClass={() => setClassModalOpen(true)} onImportStudents={() => setStudentImportOpen(true)} onDownloadTemplate={() => downloadStudentTemplate(classes)} />}{activePage === "loans" && <LoansPage loansList={loansList} onQuickLoan={() => setModalOpen(true)} onReturnLoan={returnLoan} />}{activePage === "settings" && <SettingsPage categories={categories} avatarShape={avatarShape} onAvatarShapeChange={setAvatarShape} onAddCategory={addCategory} onDeleteCategory={deleteCategory} />}</div></main>{modalOpen && <QuickLoanModal membersList={membersList} booksList={booksList} onClose={() => setModalOpen(false)} onAddLoan={addLoan} />}{ebookModalOpen && <AddEbookModal nextCode={nextEbookCode} categories={categories} onClose={() => setEbookModalOpen(false)} onAdd={addEbook} />}{ebookToEdit && <EditEbookModal ebook={ebookToEdit} categories={categories} onClose={() => setEbookToEdit(null)} onSave={updateEbook} />}{readingEbook && <FlipbookReader ebook={readingEbook} onClose={() => setReadingEbook(null)} />}{bookModalOpen && <AddBookModal nextCode={nextBookCode} categories={categories} onClose={() => setBookModalOpen(false)} onAdd={addBook} />}{bookToEdit && <EditBookModal book={bookToEdit} categories={categories} onClose={() => setBookToEdit(null)} onSave={updateBook} />}{memberModalOpen && <AddMemberModal nextCodes={nextMemberCodes} existingMembers={membersList} classes={classes} onClose={() => setMemberModalOpen(false)} onAdd={addMember} />}{memberToEdit && <EditMemberModal member={memberToEdit} existingMembers={membersList} classes={classes} onClose={() => setMemberToEdit(null)} onSave={updateMember} />}{classModalOpen && <AddClassModal classes={classes} onClose={() => setClassModalOpen(false)} onAdd={addClass} onDelete={deleteClass} />}{studentImportOpen && <ImportStudentsModal classes={classes} onClose={() => setStudentImportOpen(false)} onImport={importStudents} />}{guideOpen && <GuideModal onClose={() => setGuideOpen(false)} onNavigate={navigate} />}{profileOpen && <ProfileModal profile={profile} onClose={() => setProfileOpen(false)} onSave={saveProfile} onLogout={() => { if (window.confirm("Apakah Anda yakin ingin keluar?")) { localStorage.clear(); router.push("/login"); } }} />}</div>;
 }

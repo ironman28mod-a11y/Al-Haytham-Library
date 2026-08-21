@@ -23,6 +23,12 @@ next-env.d.ts
 # vercel
 .vercel
 
+# cloudflare workers
+.wrangler/
+
 # freebuff
 .freebuff/
 .dev-server.log
+
+# local dev
+.local-d1.sqlite
