@@ -22,11 +22,13 @@ export async function POST(req: Request) {
     await db.insert(categories).values({ name: body.name.trim() });
     return NextResponse.json({ ok: true }, { status: 201 });
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (message.includes("unique") || message.includes("duplicate")) {
-      return NextResponse.json({ error: "Category already exists" }, { status: 409 });
-    }
     console.error("POST /api/categories error:", err);
-    return NextResponse.json({ error: "Failed to create category" }, { status: 500 });
+    const pgError = err as { code?: string; cause?: { code?: string; message?: string }; message?: string };
+    const errorCode = pgError?.code ?? pgError?.cause?.code;
+    if (errorCode === "23505") {
+      return NextResponse.json({ error: "Kategori sudah ada di database" }, { status: 409 });
+    }
+    const detail = pgError?.cause?.message ?? pgError?.message ?? "kesalahan tidak diketahui";
+    return NextResponse.json({ error: `Gagal menyimpan kategori: ${detail}` }, { status: 500 });
   }
 }

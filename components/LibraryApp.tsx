@@ -2378,7 +2378,11 @@ export default function LibraryApp() {
     const normalized = name.trim();
     if (!normalized || categories.some((category) => category.toLowerCase() === normalized.toLowerCase())) return false;
     setCategories((current) => [...current, normalized]);
-    void api.createCategory(normalized).catch(() => undefined);
+    void api.createCategory(normalized).catch((err) => {
+      console.error("Gagal menyimpan kategori:", err);
+      addToast(`Kategori gagal tersimpan ke database: ${err instanceof Error ? err.message : "coba lagi"}.`, "error");
+      setCategories((current) => current.filter((category) => category !== normalized));
+    });
     return true;
   };
 
@@ -2386,7 +2390,11 @@ export default function LibraryApp() {
     const used = [...booksList, ...ebooksList].some((item) => item.category.toLowerCase() === name.toLowerCase());
     if (used) return false;
     setCategories((current) => current.filter((category) => category !== name));
-    void api.deleteCategory(name).catch(() => undefined);
+    void api.deleteCategory(name).catch((err) => {
+      console.error("Gagal menghapus kategori:", err);
+      addToast(`Kategori gagal dihapus dari database: ${err instanceof Error ? err.message : "coba lagi"}.`, "error");
+      setCategories((current) => current.includes(name) ? current : [...current, name]);
+    });
     return true;
   };
 
@@ -2542,14 +2550,22 @@ export default function LibraryApp() {
     const normalized = name.trim();
     if (!normalized || classes.some((item) => item.toLowerCase() === normalized.toLowerCase())) return false;
     setClasses((current) => [...current, normalized]);
-    void api.createClass(normalized).catch(() => undefined);
+    void api.createClass(normalized).catch((err) => {
+      console.error("Gagal menyimpan kelas:", err);
+      addToast(`Kelas gagal tersimpan ke database: ${err instanceof Error ? err.message : "coba lagi"}.`, "error");
+      setClasses((current) => current.filter((item) => item !== normalized));
+    });
     return true;
   };
 
   const deleteClass = (name: string) => {
     if (membersList.some((member) => member.role === "Siswa" && member.className.toLowerCase() === name.toLowerCase())) return false;
     setClasses((current) => current.filter((item) => item !== name));
-    void api.deleteClass(name).catch(() => undefined);
+    void api.deleteClass(name).catch((err) => {
+      console.error("Gagal menghapus kelas:", err);
+      addToast(`Kelas gagal dihapus dari database: ${err instanceof Error ? err.message : "coba lagi"}.`, "error");
+      setClasses((current) => current.includes(name) ? current : [...current, name]);
+    });
     return true;
   };
 
