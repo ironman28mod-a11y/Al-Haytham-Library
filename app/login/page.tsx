@@ -3,6 +3,8 @@
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 
+const AUTH_KEY = "al-haytham-library:auth";
+
 const demoAccount = {
   username: "admin.alhaytham",
   password: "AlHaytham123!",
@@ -30,6 +32,7 @@ export default function LoginPage() {
     }
 
     setLoginError("");
+    localStorage.setItem(AUTH_KEY, "true");
     router.push("/");
   };
 
@@ -41,14 +44,14 @@ export default function LoginPage() {
   return (
     <main className="login-page">
       <section className="login-art">
-        <div className="login-brand"><span className="brand-mark"><span /><span /><span /></span><span>Al-Haytham <span className="brand-accent">Library</span></span></div>
+        <div className="login-brand"><img src="/logo.png" alt="Al-Haytham Library" className="brand-logo" width="48" height="48" /><span>Al-Haytham <span className="brand-accent">Library</span></span></div>
         <div className="art-copy"><span className="eyebrow">PERPUSTAKAAN SEKOLAH</span><h1>Temukan cerita,<br /><em>tumbuhkan</em> imajinasi.</h1><p>Ruang sederhana untuk mengelola koleksi dan membangun kebiasaan membaca bersama.</p></div>
         <div className="art-books"><div className="floating-book book-one">Membaca<br />adalah<br />petualangan</div><div className="floating-book book-two">The<br />world<br />inside</div><div className="art-leaf">✦</div></div>
         <span className="art-footer">© 2024 Al-Haytham Library</span>
       </section>
       <section className="login-form-area">
         <div className="login-form-wrap">
-          <div className="mobile-login-brand"><span className="brand-mark"><span /><span /><span /></span><span>Al-Haytham <span className="brand-accent">Library</span></span></div>
+          <div className="mobile-login-brand"><img src="/logo.png" alt="Al-Haytham Library" className="brand-logo" width="40" height="40" /><span>Al-Haytham <span className="brand-accent">Library</span></span></div>
           <div className="login-heading"><span className="eyebrow">SELAMAT DATANG KEMBALI</span><h2>Masuk ke Al-Haytham Library</h2><p>Gunakan akun Anda untuk melanjutkan.</p></div>
           <div className="role-switch"><button type="button" className={role === "member" ? "selected" : ""} onClick={() => selectRole("member")}>Anggota</button><button type="button" className={role === "staff" ? "selected" : ""} onClick={() => selectRole("staff")}>Petugas</button></div>
           <div className="demo-credentials"><span className="eyebrow">AKUN DEMO PETUGAS</span><p><span>Username <strong>{demoAccount.username}</strong></span><span>Password <strong>{demoAccount.password}</strong></span></p></div>
