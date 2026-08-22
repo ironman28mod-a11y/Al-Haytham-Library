@@ -318,3 +318,20 @@ button:focus-visible, input:focus-visible { outline: 3px solid rgba(79, 144, 120
 /* Notifikasi lanjut membaca */
 .flipbook-resume-notice { position: absolute; top: 76px; left: 50%; transform: translateX(-50%); z-index: 220; background: rgba(20,33,27,.95); border: 1px solid rgba(127,191,159,.4); color: #d9ecdf; font-size: 11px; padding: 7px 14px; border-radius: 99px; box-shadow: 0 10px 26px rgba(0,0,0,.35); animation: notice-in .25s var(--ease-out); pointer-events: none; white-space: nowrap; }
 @keyframes notice-in { from { opacity: 0; transform: translate(-50%, -8px); } to { opacity: 1; transform: translate(-50%, 0); } }
+
+/* ── Toast notifications ─────────────────────────────── */
+.toast-container { position: fixed; top: 20px; right: 20px; z-index: 9999; display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
+.toast { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-radius: 8px; font-size: 12px; color: #fff; pointer-events: auto; cursor: pointer; box-shadow: 0 6px 20px rgba(0,0,0,.18); animation: toast-in .28s var(--ease-out); max-width: 360px; }
+.toast-error { background: #bd4a44; }
+.toast-success { background: #3a7a52; }
+.toast-info { background: #52625b; }
+.toast-icon { font-size: 14px; flex-shrink: 0; }
+.toast-message { flex: 1; line-height: 1.35; }
+.toast-close { background: none; border: 0; color: rgba(255,255,255,.7); font-size: 16px; cursor: pointer; padding: 0 2px; flex-shrink: 0; line-height: 1; }
+.toast-close:hover { color: #fff; }
+@keyframes toast-in { from { opacity: 0; transform: translateX(40px); } to { opacity: 1; transform: translateX(0); } }
+
+/* Dark mode toast */
+.app-shell.dark-mode .toast-error { background: #7a2e2b; }
+.app-shell.dark-mode .toast-success { background: #2a5a3a; }
+.app-shell.dark-mode .toast-info { background: #3a4a42; }
