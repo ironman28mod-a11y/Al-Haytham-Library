@@ -33,9 +33,11 @@ type IconName =
   | "monitor"
   | "rotate"
   | "user"
-  | "card";
+  | "card"
+  | "barChart";
 
-type PageKey = "overview" | "ebooks" | "books" | "members" | "loans" | "settings";
+type PageKey = "overview" | "ebooks" | "books" | "members" | "loans" | "reports" | "reservations" | "settings";
+type ThemeMode = "auto" | "light" | "dark";
 type ProfileRole = "staff" | "student";
 type ProfileData = { name: string; email: string; phone: string; bio: string; role: ProfileRole; detail: string; avatarData?: string; avatarName?: string };
 
@@ -71,6 +73,7 @@ const CLASSES_STORAGE_KEY = "al-haytham-library:classes:v1";
 const LOANS_STORAGE_KEY = "al-haytham-library:loans:v1";
 const AVATAR_SHAPE_STORAGE_KEY = "al-haytham-library:avatar-shape:v1";
 const READING_PROGRESS_STORAGE_KEY = "al-haytham-library:reading-progress:v1";
+const DARK_MODE_STORAGE_KEY = "al-haytham-library:dark-mode:v1";
 const FILE_DB_NAME = "al-haytham-library-files";
 const FILE_STORE_NAME = "files";
 const SUPPORTED_EBOOK_FORMATS = ["PDF", "EPUB", "MOBI"] as const;
@@ -107,20 +110,20 @@ async function dataUrlToBlob(dataUrl: string) {
 async function storeLibraryFile(id: string, file: File, compressLocal = false) {
   const optimized = file.type.startsWith("image/") ? await compressImageFile(file) : file;
   await saveBrowserFile(id, optimized, compressLocal && !optimized.type.startsWith("image/"));
-  if (api.isRemoteConfigured()) await api.uploadFile(id, optimized, file.name);
+  await api.uploadFile(id, optimized, file.name).catch(() => undefined);
   return optimized;
 }
 
 async function moveAvatarToRemote(id: string, dataUrl?: string) {
-  if (!dataUrl || !api.isRemoteConfigured() || !dataUrl.startsWith("data:")) return dataUrl;
+  if (!dataUrl || !dataUrl.startsWith("data:")) return dataUrl;
   await api.uploadFile(id, await dataUrlToBlob(dataUrl), "avatar.jpg");
   return api.fileUrl(id);
 }
 
 async function loadLibraryFile(id: string) {
   const local = await loadBrowserFile(id).catch(() => null);
-  if (local || !api.isRemoteConfigured()) return local;
-  const remote = await api.downloadFile(id);
+  if (local) return local;
+  const remote = await api.downloadFile(id).catch(() => null);
   if (remote) void saveBrowserFile(id, remote).catch(() => undefined);
   return remote;
 }
@@ -388,7 +391,6 @@ type MemberRole = "Admin" | "Guru" | "Siswa";
 type Member = { name: string; code: string; className: string; joined: string; status: string; initials: string; color: string; role: MemberRole; username: string; password: string; avatarData?: string; avatarName?: string };
 
 async function migrateLocalFilesToDrive(books: Book[], ebooks: EBook[], members: Member[], updateMembers: (members: Member[]) => void) {
-  if (!api.isRemoteConfigured()) return;
   let nextMembers = members;
   for (const item of books) {
     if (!item.coverId) continue;
@@ -414,6 +416,9 @@ async function migrateLocalFilesToDrive(books: Book[], ebooks: EBook[], members:
 
 type LoanStatus = "Dipinjam" | "Terlambat" | "Dikembalikan";
 type Loan = { id: string; member: string; memberCode: string; book: string; bookCode: string; borrowed: string; borrowedDate?: string; due: string; dueDate?: string; returnedDate?: string; status: LoanStatus; avatar: string; color: string; avatarData?: string };
+
+type ReservationStatus = "Menunggu" | "Tersedia" | "Selesai" | "Dibatalkan";
+type Reservation = { id: string; member: string; memberCode: string; book: string; bookCode: string; reservedAt: string; status: ReservationStatus; notifiedAt?: string; avatar: string; color: string; avatarData?: string };
 
 const initialMembers: Member[] = [
   { name: "Rina Nuraini", code: "ADM-001", className: "Admin Perpustakaan", joined: "10 Jan 2024", status: "Aktif", initials: "RN", color: "#cfe4da", role: "Admin", username: "admin.alhaytham", password: "AlHaytham123!" },
@@ -610,6 +615,8 @@ const navItems: { key: PageKey; label: string; icon: IconName }[] = [
   { key: "books", label: "Katalog Buku", icon: "book" },
   { key: "members", label: "Anggota", icon: "users" },
   { key: "loans", label: "Peminjaman", icon: "repeat" },
+  { key: "reservations", label: "Reservasi", icon: "clock" },
+  { key: "reports", label: "Laporan", icon: "barChart" },
 ];
 
 function Icon({ name, size = 19, strokeWidth = 1.8, style }: { name: IconName; size?: number; strokeWidth?: number; style?: React.CSSProperties }) {
@@ -642,6 +649,7 @@ function Icon({ name, size = 19, strokeWidth = 1.8, style }: { name: IconName; s
     user: <><circle cx="12" cy="8" r="4" /><path d="M4 20c0-3.3 3.6-5 8-5s8 1.7 8 5" /></>,
     card: <><rect x="3" y="6" width="18" height="12" rx="2" /><path d="M3 10h18M7 15h4" /></>,
     monitor: <><rect x="2" y="3" width="20" height="14" rx="2" /><path d="M8 21h8M12 17v4" /></>,
+    barChart: <><path d="M4 20V10M10 20V4M16 20v-6M22 20V8" /></>,
   };
 
   return <svg aria-hidden="true" className="icon" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" style={style}>{paths[name]}</svg>;
@@ -1416,12 +1424,73 @@ function EditBookModal({ book, categories, onClose, onSave }: { book: Book; cate
   return <div className="modal-backdrop" role="presentation" onClick={onClose}><div className="modal" role="dialog" aria-modal="true" aria-labelledby="book-edit-title" onClick={(event) => event.stopPropagation()}><div className="modal-header"><div><span className="eyebrow">EDIT KOLEKSI BUKU</span><h2 id="book-edit-title">Edit buku</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Tutup"><Icon name="close" size={20} /></button></div><form onSubmit={submit}><div className="form-grid"><label className="form-span">Judul buku<input value={title} onChange={(event) => { setTitle(event.target.value); setError(""); }} placeholder="Contoh: Negeri 5 Menara" /></label><label>Penulis<input value={author} onChange={(event) => { setAuthor(event.target.value); setError(""); }} placeholder="Contoh: Ahmad Fuadi" /></label><label>Kategori<select value={category} onChange={(event) => { setCategory(event.target.value); setError(""); }}><option value="">Pilih kategori</option>{categories.map((item) => <option key={item} value={item}>{item}</option>)}</select></label><label className="form-span file-upload-label">Ganti cover (opsional)<input className="file-input" type="file" accept="image/*" onChange={handleCoverChange} /><span className="file-upload-box"><Icon name="download" size={17} /><span>{cover ? cover.name : book.coverName ?? "Pilih gambar untuk mengganti cover"}<small>{cover ? `${formatFileSize(cover.size)} · akan menggantikan cover lama` : book.coverName ? `Cover saat ini: ${book.coverName}` : "Belum ada cover"}</small></span></span></label></div>{error && <div className="form-error"><Icon name="alert" size={16} />{error}</div>}<div className="modal-actions"><button type="button" className="button button-outline" onClick={onClose}>Batal</button><button type="submit" className="button button-primary" disabled={saving}>{saving ? "Menyimpan..." : "Simpan perubahan"}</button></div></form></div></div>;
 }
 
-function BooksPage({ booksList, categories, onAdd, isAdmin, onEdit, onDelete }: { booksList: Book[]; categories: string[]; onAdd: () => void; isAdmin: boolean; onEdit: (book: Book) => void; onDelete: (book: Book) => void }) {
+function ReservationsPage({ reservationsList, booksList, membersList, onCancel, onFulfill }: { reservationsList: Reservation[]; booksList: Book[]; membersList: Member[]; onCancel: (reservation: Reservation) => void; onFulfill: (reservation: Reservation) => void }) {
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"" | ReservationStatus>("");
+  const [menuOpenFor, setMenuOpenFor] = useState("");
+
+  useEffect(() => {
+    if (!menuOpenFor) return;
+    const closeMenu = () => setMenuOpenFor("");
+    window.addEventListener("click", closeMenu);
+    return () => window.removeEventListener("click", closeMenu);
+  }, [menuOpenFor]);
+
+  const filtered = useMemo(() => reservationsList.filter((reservation) => {
+    const matchesSearch = `${reservation.member} ${reservation.book}`.toLowerCase().includes(search.toLowerCase());
+    const matchesStatus = !statusFilter || reservation.status === statusFilter;
+    return matchesSearch && matchesStatus;
+  }), [search, reservationsList, statusFilter]);
+
+  const waitingCount = reservationsList.filter((r) => r.status === "Menunggu").length;
+  const readyCount = reservationsList.filter((r) => r.status === "Tersedia").length;
+
+  return <>
+    <PageHeader title="Reservasi buku" description="Kelola antrian siswa yang mengantri buku yang sedang habis dipinjam." />
+    <div className="stat-grid">
+      <StatCard icon="clock" label="Menunggu" value={String(waitingCount)} change="dalam antrian" context="reservasi aktif" up accent="orange" />
+      <StatCard icon="check" label="Tersedia diambil" value={String(readyCount)} change="siap diambil" context="reservasi" up accent="green" />
+    </div>
+    <div className="toolbar">
+      <label className="search-box"><Icon name="search" size={18} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Cari nama anggota atau judul buku..." /></label>
+      <div className="filter-control">
+        <select className="button button-outline" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as "" | ReservationStatus)}>
+          <option value="">Semua status</option>
+          <option value="Menunggu">Menunggu</option>
+          <option value="Tersedia">Tersedia</option>
+          <option value="Selesai">Selesai</option>
+        </select>
+      </div>
+    </div>
+    {filtered.length > 0 ? (
+      <div className="table-scroll"><table><thead><tr><th>Anggota</th><th>Buku</th><th>Tanggal reservasi</th><th>Status</th><th>Aksi</th></tr></thead><tbody>{filtered.map((reservation) => (
+        <tr key={reservation.id}>
+          <td><div className="person"><span className="avatar" style={{ backgroundColor: reservation.color }}>{reservation.avatarData ? <img src={reservation.avatarData} alt={`Foto ${reservation.member}`} /> : reservation.avatar}</span><span><b>{reservation.member}</b><small>{membersList.find((m) => m.code === reservation.memberCode)?.className ?? ""}</small></span></div></td>
+          <td><div><b>{reservation.book}</b><small>{reservation.bookCode}</small></div></td>
+          <td>{reservation.reservedAt}</td>
+          <td><StatusPill status={reservation.status === "Menunggu" ? "Dipinjam" : reservation.status === "Tersedia" ? "Dikembalikan" : "Dikembalikan"} /><span style={{ marginLeft: 6, fontSize: 11, color: reservation.status === "Tersedia" ? "var(--green)" : reservation.status === "Menunggu" ? "var(--orange)" : "#9aa8a1" }}>{reservation.status}</span></td>
+          <td>
+            <div style={{ display: "flex", gap: 6 }}>
+              {reservation.status === "Menunggu" && <button className="button button-outline" style={{ fontSize: 11, padding: "4px 10px", minHeight: 28 }} onClick={() => onCancel(reservation)}><Icon name="close" size={13} /> Batal</button>}
+              {reservation.status === "Tersedia" && <button className="button button-primary" style={{ fontSize: 11, padding: "4px 10px", minHeight: 28 }} onClick={() => onFulfill(reservation)}><Icon name="check" size={13} /> Selesai</button>}
+              {reservation.status === "Tersedia" && <button className="button button-outline" style={{ fontSize: 11, padding: "4px 10px", minHeight: 28 }} onClick={() => onCancel(reservation)}><Icon name="close" size={13} /> Batal</button>}
+            </div>
+          </td>
+        </tr>
+      ))}</tbody></table></div>
+    ) : (
+      <div className="empty-state"><Icon name="clock" size={30} /><h3>Belum ada reservasi</h3><p>Siswa dapat mengantri buku dari halaman katalog buku.</p></div>
+    )}
+  </>;
+}
+
+function BooksPage({ booksList, categories, onAdd, isAdmin, onEdit, onDelete, onReserve, reservationsList }: { booksList: Book[]; categories: string[]; onAdd: () => void; isAdmin: boolean; onEdit: (book: Book) => void; onDelete: (book: Book) => void; onReserve?: (bookCode: string) => boolean; reservationsList?: Reservation[] }) {
   const [search, setSearch] = useState("");
   const [filterOpen, setFilterOpen] = useState(false);
   const [categoryFilter, setCategoryFilter] = useState("");
   const [availabilityFilter, setAvailabilityFilter] = useState("");
   const [menuOpenFor, setMenuOpenFor] = useState("");
+  const [reserveMessage, setReserveMessage] = useState("");
 
   useEffect(() => {
     if (!menuOpenFor) return;
@@ -1437,7 +1506,7 @@ function BooksPage({ booksList, categories, onAdd, isAdmin, onEdit, onDelete }: 
   }), [search, booksList, categoryFilter, availabilityFilter]);
   const activeFilterCount = Number(Boolean(categoryFilter)) + Number(Boolean(availabilityFilter));
   const resetFilters = () => { setCategoryFilter(""); setAvailabilityFilter(""); };
-  return <><PageHeader title="Katalog buku" description="Kelola koleksi buku dan tampilkan cover aslinya." action={<button className="button button-primary" onClick={onAdd}><Icon name="plus" size={17} /> Tambah buku</button>} /><div className="toolbar"><label className="search-box"><Icon name="search" size={18} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Cari judul, penulis, atau kategori..." /></label><div className="filter-control"><button className={`button button-outline ${activeFilterCount > 0 ? "filter-active" : ""}`} aria-expanded={filterOpen} onClick={() => setFilterOpen((open) => !open)}><Icon name="filter" size={16} /> Filter{activeFilterCount > 0 && <span className="filter-count">{activeFilterCount}</span>}</button>{filterOpen && <div className="filter-panel" role="dialog" aria-label="Filter Katalog Buku"><div className="filter-panel-header"><strong>Filter Buku</strong><button type="button" className="text-button" onClick={resetFilters}>Reset</button></div><label className="filter-field">Kategori<select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}><option value="">Semua kategori</option>{categories.map((category) => <option key={category} value={category}>{category}</option>)}</select></label><label className="filter-field">Ketersediaan<select value={availabilityFilter} onChange={(event) => setAvailabilityFilter(event.target.value)}><option value="">Semua status</option><option value="available">Tersedia</option><option value="out">Habis dipinjam</option></select></label><button type="button" className="button button-primary filter-done" onClick={() => setFilterOpen(false)}>Terapkan</button></div>}</div><button className="button button-outline"><Icon name="download" size={16} /> Export</button></div><div className="book-grid">{filtered.map((book) => <article className="book-card" key={book.code}><div className="book-card-cover"><BookCover book={book} /><span key={book.available} className={book.available === 0 ? "stock-label out" : "stock-label"}>{book.available === 0 ? "Habis dipinjam" : `${book.available} tersedia`}</span></div><div className="book-card-body"><div className="book-category">{book.category}</div><h3>{book.title}</h3><p>{book.author}</p>{book.coverName && <span className="ebook-file" title={book.coverName}>🖼️ {book.coverName}</span>}<div className="book-meta"><span>{book.code}</span>{isAdmin && <div className="ebook-menu-wrap"><button className="icon-button subtle" aria-label={`Opsi ${book.title}`} aria-expanded={menuOpenFor === book.code} onClick={(event) => { event.stopPropagation(); setMenuOpenFor(menuOpenFor === book.code ? "" : book.code); }}><Icon name="more" size={17} /></button>{menuOpenFor === book.code && <div className="ebook-menu" role="menu"><button role="menuitem" onClick={() => { setMenuOpenFor(""); onEdit(book); }}><Icon name="edit" size={15} /> Edit</button><button role="menuitem" className="danger" onClick={() => { setMenuOpenFor(""); onDelete(book); }}><Icon name="trash" size={15} /> Hapus</button></div>}</div>}</div></div></article>)}</div>{filtered.length === 0 && <div className="empty-state"><Icon name="search" size={30} /><h3>Buku tidak ditemukan</h3><p>Coba gunakan kata kunci pencarian lain.</p></div>}</>;
+  return <><PageHeader title="Katalog buku" description="Kelola koleksi buku dan tampilkan cover aslinya." action={<button className="button button-primary" onClick={onAdd}><Icon name="plus" size={17} /> Tambah buku</button>} /><div className="toolbar"><label className="search-box"><Icon name="search" size={18} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Cari judul, penulis, atau kategori..." /></label><div className="filter-control"><button className={`button button-outline ${activeFilterCount > 0 ? "filter-active" : ""}`} aria-expanded={filterOpen} onClick={() => setFilterOpen((open) => !open)}><Icon name="filter" size={16} /> Filter{activeFilterCount > 0 && <span className="filter-count">{activeFilterCount}</span>}</button>{filterOpen && <div className="filter-panel" role="dialog" aria-label="Filter Katalog Buku"><div className="filter-panel-header"><strong>Filter Buku</strong><button type="button" className="text-button" onClick={resetFilters}>Reset</button></div><label className="filter-field">Kategori<select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}><option value="">Semua kategori</option>{categories.map((category) => <option key={category} value={category}>{category}</option>)}</select></label><label className="filter-field">Ketersediaan<select value={availabilityFilter} onChange={(event) => setAvailabilityFilter(event.target.value)}><option value="">Semua status</option><option value="available">Tersedia</option><option value="out">Habis dipinjam</option></select></label><button type="button" className="button button-primary filter-done" onClick={() => setFilterOpen(false)}>Terapkan</button></div>}</div><button className="button button-outline"><Icon name="download" size={16} /> Export</button></div>{reserveMessage && <div className="form-error" style={{ marginBottom: 16 }}><Icon name="check" size={16} /> {reserveMessage}</div>}<div className="book-grid">{filtered.map((book) => { const hasReservation = reservationsList?.some((r) => r.bookCode === book.code && r.status === "Menunggu"); return <article className="book-card" key={book.code}><div className="book-card-cover"><BookCover book={book} /><span key={book.available} className={book.available === 0 ? "stock-label out" : "stock-label"}>{book.available === 0 ? "Habis dipinjam" : `${book.available} tersedia`}</span></div><div className="book-card-body"><div className="book-category">{book.category}</div><h3>{book.title}</h3><p>{book.author}</p>{book.coverName && <span className="ebook-file" title={book.coverName}>🖼️ {book.coverName}</span>}<div className="book-meta"><span>{book.code}</span>{isAdmin && <div className="ebook-menu-wrap"><button className="icon-button subtle" aria-label={`Opsi ${book.title}`} aria-expanded={menuOpenFor === book.code} onClick={(event) => { event.stopPropagation(); setMenuOpenFor(menuOpenFor === book.code ? "" : book.code); }}><Icon name="more" size={17} /></button>{menuOpenFor === book.code && <div className="ebook-menu" role="menu"><button role="menuitem" onClick={() => { setMenuOpenFor(""); onEdit(book); }}><Icon name="edit" size={15} /> Edit</button><button role="menuitem" className="danger" onClick={() => { setMenuOpenFor(""); onDelete(book); }}><Icon name="trash" size={15} /> Hapus</button></div>}</div>}</div>{book.available === 0 && onReserve && <div style={{ marginTop: 10 }}>{hasReservation ? <span style={{ fontSize: 11, color: "var(--green)", fontWeight: 600 }}><Icon name="check" size={13} /> Sudah dalam antrian</span> : <button className="button button-outline" style={{ fontSize: 11, padding: "4px 10px", minHeight: 28, width: "100%" }} onClick={() => { const success = onReserve(book.code); setReserveMessage(success ? `Berhasil mengantri "${book.title}". Anda akan diberitahu saat buku tersedia.` : "Anda sudah mengantri buku ini."); setTimeout(() => setReserveMessage(""), 3000); }}><Icon name="clock" size={13} /> Reservasi buku</button>}</div>}</div></article>; })}</div>{filtered.length === 0 && <div className="empty-state"><Icon name="search" size={30} /><h3>Buku tidak ditemukan</h3><p>Coba gunakan kata kunci pencarian lain.</p></div>}</>;
 }
 
 function AvatarCropModal({ imageUrl, preview, onCancel, onConfirm }: { imageUrl: string; preview?: { name: string; role: string; detail: string; code?: string; color: string }; onCancel: () => void; onConfirm: (dataUrl: string) => void }) {
@@ -1806,7 +1875,136 @@ function LoansPage({ loansList, onQuickLoan, onReturnLoan }: { loansList: Loan[]
   return <><PageHeader title="Peminjaman" description="Pantau transaksi peminjaman dan pengembalian buku." action={<button className="button button-primary" onClick={onQuickLoan}><Icon name="plus" size={17} /> Peminjaman baru</button>} /><div className="summary-strip"><div><span className="mini-icon orange"><Icon name="repeat" size={16} /></span><span><b>{activeCount}</b><small>Sedang dipinjam</small></span></div><div><span className="mini-icon red"><Icon name="clock" size={16} /></span><span><b>{overdueCount}</b><small>Terlambat</small></span></div><div><span className="mini-icon green"><Icon name="check" size={16} /></span><span><b>{returnedCount}</b><small>Dikembalikan</small></span></div></div><section className="panel full-table-panel"><div className="loan-toolbar"><div className="tabs">{tabs.map((item) => <button key={item} onClick={() => setTab(item)} className={tab === item ? "tab active" : "tab"}>{item}{item === "Terlambat" && <span className="tab-count">{overdueCount}</span>}</button>)}</div><label className="date-button"><Icon name="calendar" size={16} /> Semua transaksi <Icon name="chevron" size={14} /></label></div><div className="table-scroll"><table><thead><tr><th>Anggota</th><th>Judul buku</th><th>Tanggal pinjam</th><th>Jatuh tempo</th><th>Status</th><th>Aksi</th></tr></thead><tbody>{filtered.map((loan) => { const status = getLoanStatus(loan); return <tr key={loan.id}><td><div className="person"><span className="avatar" style={{ backgroundColor: loan.color }}>{loan.avatarData ? <img src={loan.avatarData} alt={`Foto ${loan.member}`} /> : loan.avatar}</span><b>{loan.member}</b></div></td><td>{loan.book}</td><td>{loan.borrowed}</td><td className={status === "Terlambat" ? "late-text" : ""}>{loan.due}</td><td><StatusPill status={status} /></td><td>{status === "Dikembalikan" ? <span className="muted-cell">Selesai</span> : <button type="button" className="member-download loan-return-button" onClick={() => onReturnLoan(loan)}><Icon name="check" size={13} /> Kembalikan</button>}</td></tr>; })}</tbody></table></div>{filtered.length === 0 && <div className="empty-state member-empty"><Icon name="repeat" size={30} /><h3>Transaksi tidak ditemukan</h3><p>Coba pilih tab transaksi lain.</p></div>}</section></>;
 }
 
-function SettingsPage({ categories, avatarShape, onAvatarShapeChange, onAddCategory, onDeleteCategory }: { categories: string[]; avatarShape: "round" | "square"; onAvatarShapeChange: (shape: "round" | "square") => void; onAddCategory: (name: string) => boolean; onDeleteCategory: (name: string) => boolean }) {
+function ReportsPage({ booksList, membersList, loansList }: { booksList: Book[]; membersList: Member[]; loansList: Loan[] }) {
+  const [period, setPeriod] = useState<"week" | "month">("week");
+
+  // --- Summary stats ---
+  const totalLoans = loansList.length;
+  const activeLoans = loansList.filter((loan) => getLoanStatus(loan) === "Dipinjam").length;
+  const overdueLoans = loansList.filter((loan) => getLoanStatus(loan) === "Terlambat").length;
+  const returnedLoans = loansList.filter((loan) => getLoanStatus(loan) === "Dikembalikan").length;
+  const totalBooks = booksList.length;
+  const totalStock = booksList.reduce((sum, book) => sum + book.stock, 0);
+  const totalAvailable = booksList.reduce((sum, book) => sum + book.available, 0);
+  const totalMembers = membersList.length;
+  const activeMembers = membersList.filter((member) => member.status === "Aktif").length;
+
+  // --- Popular books (by loan count) ---
+  const loanCountByBook = new Map<string, number>();
+  for (const loan of loansList) loanCountByBook.set(loan.bookCode, (loanCountByBook.get(loan.bookCode) ?? 0) + 1);
+  const popularBooks = [...booksList]
+    .map((book) => ({ ...book, loanCount: loanCountByBook.get(book.code) ?? 0 }))
+    .sort((a, b) => b.loanCount - a.loanCount)
+    .slice(0, 6);
+  const maxBookLoans = Math.max(...popularBooks.map((book) => book.loanCount), 1);
+
+  // --- Active members (by loan count) ---
+  const loanCountByMember = new Map<string, number>();
+  for (const loan of loansList) loanCountByMember.set(loan.memberCode, (loanCountByMember.get(loan.memberCode) ?? 0) + 1);
+  const activeMembersList = [...membersList]
+    .filter((member) => loanCountByMember.has(member.code))
+    .map((member) => ({ ...member, loanCount: loanCountByMember.get(member.code) ?? 0 }))
+    .sort((a, b) => b.loanCount - a.loanCount)
+    .slice(0, 6);
+  const maxMemberLoans = Math.max(...activeMembersList.map((member) => member.loanCount), 1);
+
+  // --- Loan distribution by day-of-week (simplified chart) ---
+  const dayNames = ["Min", "Sen", "Sel", "Rab", "Kam", "Jum", "Sab"];
+  const loansByDay = dayNames.map((name, index) => ({ name, count: loansList.filter((loan) => {
+    const d = new Date(loan.borrowedDate ?? "");
+    return d.getDay() === index;
+  }).length }));
+  const maxDayLoans = Math.max(...loansByDay.map((d) => d.count), 1);
+
+  // --- Loan status distribution ---
+  const statusData = [
+    { label: "Dipinjam", count: activeLoans, color: "green" },
+    { label: "Terlambat", count: overdueLoans, color: "orange" },
+    { label: "Dikembalikan", count: returnedLoans, color: "blue" },
+  ];
+  const maxStatusCount = Math.max(...statusData.map((s) => s.count), 1);
+
+  // --- Export CSV ---
+  const exportLoansCsv = () => {
+    const header = "ID Anggota,Nama Anggota,Kode Buku,Judul Buku,Tanggal Pinjam,Jatuh Tempo,Status\n";
+    const rows = loansList.map((loan) => [loan.memberCode, loan.member, loan.bookCode, loan.book, loan.borrowed, loan.due, getLoanStatus(loan)].map(csvCell).join(",")).join("\n");
+    downloadTextFile(`laporan-peminjaman-${dateInputValue()}.csv`, `\ufeff${header}${rows}`, "text/csv;charset=utf-8");
+  };
+
+  const exportBooksCsv = () => {
+    const header = "Kode,Judul,Penulis,Kategori,Stok,Tersedia\n";
+    const rows = booksList.map((book) => [book.code, book.title, book.author, book.category, String(book.stock), String(book.available)].map(csvCell).join(",")).join("\n");
+    downloadTextFile(`laporan-koleksi-buku-${dateInputValue()}.csv`, `\ufeff${header}${rows}`, "text/csv;charset=utf-8");
+  };
+
+  return <>
+    <PageHeader title="Laporan & Analitik" description="Pantau tren aktivitas perpustakaan dan unduh laporan." action={<div className="member-page-actions"><button className="button button-outline" onClick={exportBooksCsv}><Icon name="download" size={16} /> Koleksi buku</button><button className="button button-primary" onClick={exportLoansCsv}><Icon name="download" size={16} /> Peminjaman</button></div>} />
+
+    {/* Summary cards */}
+    <div className="stat-grid">
+      <StatCard icon="repeat" label="Total transaksi" value={String(totalLoans)} change={`${activeLoans} aktif`} context="semua peminjaman" up accent="green" />
+      <StatCard icon="book" label="Koleksi buku" value={String(totalBooks)} change={`${totalStock} total stok`} context={`${totalAvailable} tersedia`} up accent="blue" />
+      <StatCard icon="users" label="Anggota aktif" value={String(activeMembers)} change={`${totalMembers} terdaftar`} context="data anggota" up accent="orange" />
+      <StatCard icon="alert" label="Terlambat" value={String(overdueLoans)} change={`${returnedLoans} dikembalikan`} context="perlu ditindak" up={overdueLoans === 0} accent="red" />
+    </div>
+
+    <div className="reports-grid">
+      {/* Loan status distribution */}
+      <section className="panel">
+        <div className="panel-heading"><div><h2>Distribusi status peminjaman</h2><p>Persentase transaksi berdasarkan status saat ini</p></div></div>
+        <div className="reports-bar-chart">
+          {statusData.map((item) => <div className="reports-bar-row" key={item.label}>
+            <span className="reports-bar-label">{item.label}</span>
+            <div className="reports-bar-track"><div className={`reports-bar-fill ${item.color}`} style={{ width: `${Math.max(8, (item.count / maxStatusCount) * 100)}%` }} /></div>
+            <span className="reports-bar-value"><strong>{item.count}</strong> transaksi</span>
+          </div>)}
+        </div>
+      </section>
+
+      {/* Loans by day of week */}
+      <section className="panel">
+        <div className="panel-heading"><div><h2>Peminjaman per hari</h2><p>Distribusi peminjaman berdasarkan hari dalam minggu</p></div></div>
+        <div className="reports-column-chart">
+          {loansByDay.map((day) => <div className="reports-column" key={day.name}>
+            <span className="reports-column-value">{day.count}</span>
+            <div className="reports-column-bar" style={{ height: `${Math.max(8, (day.count / maxDayLoans) * 100)}%` }} />
+            <span className="reports-column-label">{day.name}</span>
+          </div>)}
+        </div>
+      </section>
+
+      {/* Popular books */}
+      <section className="panel">
+        <div className="panel-heading"><div><h2>Buku paling populer</h2><p>Berdasarkan jumlah transaksi peminjaman</p></div></div>
+        <div className="reports-popular-list">
+          {popularBooks.map((book, index) => <div className="reports-popular-item" key={book.code}>
+            <span className="reports-rank">{index + 1}</span>
+            <BookCover book={book} small />
+            <div className="reports-popular-info"><b>{book.title}</b><span>{book.author}</span></div>
+            <span className="reports-popular-count"><strong>{book.loanCount}</strong>x</span>
+          </div>)}
+          {popularBooks.length === 0 && <div className="empty-state" style={{ minHeight: 120 }}><Icon name="book" size={24} /><h3>Belum ada data peminjaman</h3></div>}
+        </div>
+      </section>
+
+      {/* Active members */}
+      <section className="panel">
+        <div className="panel-heading"><div><h2>Anggota paling aktif</h2><p>Peminjam terbanyak dalam periode ini</p></div></div>
+        <div className="reports-popular-list">
+          {activeMembersList.map((member, index) => <div className="reports-popular-item" key={member.code}>
+            <span className="reports-rank">{index + 1}</span>
+            <span className="avatar reports-member-avatar" style={{ backgroundColor: member.color }}>{member.avatarData ? <img src={member.avatarData} alt={`Foto ${member.name}`} /> : member.initials}</span>
+            <div className="reports-popular-info"><b>{member.name}</b><span>{member.className}</span></div>
+            <span className="reports-popular-count"><strong>{member.loanCount}</strong>x</span>
+          </div>)}
+          {activeMembersList.length === 0 && <div className="empty-state" style={{ minHeight: 120 }}><Icon name="users" size={24} /><h3>Belum ada data peminjaman</h3></div>}
+        </div>
+      </section>
+    </div>
+  </>;
+}
+
+function SettingsPage({ categories, avatarShape, onAvatarShapeChange, themeMode, onThemeModeChange, onAddCategory, onDeleteCategory }: { categories: string[]; avatarShape: "round" | "square"; onAvatarShapeChange: (shape: "round" | "square") => void; themeMode: ThemeMode; onThemeModeChange: (mode: ThemeMode) => void; onAddCategory: (name: string) => boolean; onDeleteCategory: (name: string) => boolean }) {
   const [libraryName, setLibraryName] = useState("Al-Haytham Library");
   const [adminEmail, setAdminEmail] = useState("admin@alhaytham.sch.id");
   const [loanDuration, setLoanDuration] = useState("7");
@@ -1869,6 +2067,14 @@ function SettingsPage({ categories, avatarShape, onAvatarShapeChange, onAddCateg
         <div className="avatar-shape-options">
           <button type="button" className={`avatar-shape-option ${avatarShape === "round" ? "active" : ""}`} onClick={() => { onAvatarShapeChange("round"); setSaved(false); }}><span className="avatar-shape-demo round"><span>RN</span></span><span><b>Bulat</b><small>Bentuk avatar lingkaran penuh</small></span></button>
           <button type="button" className={`avatar-shape-option ${avatarShape === "square" ? "active" : ""}`} onClick={() => { onAvatarShapeChange("square"); setSaved(false); }}><span className="avatar-shape-demo square"><span>RN</span></span><span><b>Persegi</b><small>Sudut membulat, tampilan modern</small></span></button>
+        </div>
+      </section>
+      <section className="panel settings-panel">
+        <div className="panel-heading"><div><h2>Tema tampilan</h2><p>Pilih tema terang, gelap, atau ikuti pengaturan perangkat.</p></div></div>
+        <div className="avatar-shape-options">
+          <button type="button" className={`theme-option ${themeMode === "auto" ? "active" : ""}`} onClick={() => { onThemeModeChange("auto"); setSaved(false); }}><span className="theme-option-demo demo-auto" /><span><b>Otomatis</b><small>Ikuti pengaturan terang/gelap perangkat</small></span></button>
+          <button type="button" className={`theme-option ${themeMode === "light" ? "active" : ""}`} onClick={() => { onThemeModeChange("light"); setSaved(false); }}><span className="theme-option-demo demo-light" /><span><b>Terang</b><small>Tampilan default dengan latar cerah</small></span></button>
+          <button type="button" className={`theme-option ${themeMode === "dark" ? "active" : ""}`} onClick={() => { onThemeModeChange("dark"); setSaved(false); }}><span className="theme-option-demo demo-dark" /><span><b>Gelap</b><small>Mata lebih nyaman di ruangan minim cahaya</small></span></button>
         </div>
       </section>
       <section className="panel settings-panel category-settings-panel">
@@ -1942,9 +2148,10 @@ const notifications: { title: string; detail: string; time: string; icon: IconNa
   { title: "Peminjaman baru tercatat", detail: "Nadia Putri meminjam Atomic Habits", time: "3 jam lalu", icon: "repeat", page: "loans" },
 ];
 
-function NotificationPanel({ onNavigate, onClose, overdueCount, lowStockCount }: { onNavigate: (page: PageKey) => void; onClose: () => void; overdueCount: number; lowStockCount: number }) {
+function NotificationPanel({ onNavigate, onClose, overdueCount, lowStockCount, readyReservations }: { onNavigate: (page: PageKey) => void; onClose: () => void; overdueCount: number; lowStockCount: number; readyReservations?: Reservation[] }) {
+  const readyCount = readyReservations?.length ?? 0;
   const currentNotifications = notifications.map((notification, index) => index === 0 ? { ...notification, title: `${overdueCount} peminjaman terlambat`, detail: overdueCount > 0 ? "Perlu segera ditindaklanjuti" : "Tidak ada peminjaman terlambat" } : index === 1 ? { ...notification, title: `${lowStockCount} buku stok menipis`, detail: lowStockCount > 0 ? "Stok tersedia kurang dari 3" : "Semua stok buku aman" } : notification);
-  return <div className="notification-panel" role="dialog" aria-label="Daftar notifikasi"><div className="notification-panel-header"><div><strong>Notifikasi</strong><small>3 pemberitahuan terbaru</small></div><button type="button" onClick={onClose}>Tutup</button></div><div className="notification-list">{currentNotifications.map((notification) => <button type="button" className="notification-item" key={notification.title} onClick={() => { onNavigate(notification.page); onClose(); }}><span className="notification-icon"><Icon name={notification.icon} size={16} /></span><span className="notification-copy"><strong>{notification.title}</strong><small>{notification.detail}</small><em>{notification.time}</em></span><span className="notification-unread" /></button>)}</div><button type="button" className="notification-all" onClick={() => { onNavigate("loans"); onClose(); }}>Lihat semua aktivitas <span>→</span></button></div>;
+  return <div className="notification-panel" role="dialog" aria-label="Daftar notifikasi"><div className="notification-panel-header"><div><strong>Notifikasi</strong><small>{currentNotifications.length + (readyCount > 0 ? 1 : 0)} pemberitahuan terbaru</small></div><button type="button" onClick={onClose}>Tutup</button></div><div className="notification-list">{currentNotifications.map((notification) => <button type="button" className="notification-item" key={notification.title} onClick={() => { onNavigate(notification.page); onClose(); }}><span className="notification-icon"><Icon name={notification.icon} size={16} /></span><span className="notification-copy"><strong>{notification.title}</strong><small>{notification.detail}</small><em>{notification.time}</em></span><span className="notification-unread" /></button>)}{readyCount > 0 && readyReservations?.slice(0, 3).map((reservation) => <button type="button" className="notification-item" key={reservation.id} onClick={() => { onNavigate("reservations"); onClose(); }}><span className="notification-icon" style={{ background: "#e8f3ee", color: "var(--green)" }}><Icon name="check" size={16} /></span><span className="notification-copy"><strong>Buku tersedia: {reservation.book}</strong><small>{reservation.member} dapat mengambil buku ini</small><em>Sekarang</em></span><span className="notification-unread" /></button>)}</div><button type="button" className="notification-all" onClick={() => { onNavigate("loans"); onClose(); }}>Lihat semua aktivitas <span>→</span></button></div>;
 }
 
 const guideSteps: { title: string; description: string; tips: string[]; page: PageKey }[] = [
@@ -2018,29 +2225,31 @@ export default function LibraryApp() {
   const [booksList, setBooksList] = useState<Book[]>(initialBooks);
   const [membersList, setMembersList] = useState<Member[]>(initialMembers);
   const [loansList, setLoansList] = useState<Loan[]>(initialLoans);
+  const [reservationsList, setReservationsList] = useState<Reservation[]>([]);
   const [classes, setClasses] = useState<string[]>(initialClasses);
   const [categories, setCategories] = useState<string[]>(initialCategories);
   const [catalogHydrated, setCatalogHydrated] = useState(false);
   const [storageWarning, setStorageWarning] = useState("");
   const [avatarShape, setAvatarShape] = useState<"round" | "square">("round");
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
+    if (typeof window === "undefined") return "auto";
+    try {
+      const stored = window.localStorage.getItem(DARK_MODE_STORAGE_KEY);
+      if (stored === "light" || stored === "dark" || stored === "auto") return stored;
+    } catch { /* ignore */ }
+    return "auto";
+  });
 
   useEffect(() => {
     let active = true;
     const hydrateCatalog = async () => {
       try {
-        const API_URL = process.env.NEXT_PUBLIC_API_URL;
-        if (!API_URL) {
-          // No remote API configured — use initial/seeded data (offline mode).
-          if (active) {
-            setCatalogHydrated(true);
-          }
-          return;
-        }
-        const [remoteEbooks, remoteBooks, remoteMembers, remoteLoans, remoteCategories, remoteClasses, remoteProfile, storedAvatarShape] = await Promise.all([
+        const [remoteEbooks, remoteBooks, remoteMembers, remoteLoans, remoteReservations, remoteCategories, remoteClasses, remoteProfile, storedAvatarShape] = await Promise.all([
           api.fetchEbooks(),
           api.fetchBooks(),
           api.fetchMembers(),
           api.fetchLoans(),
+          api.fetchReservations().catch(() => [] as api.Reservation[]),
           api.fetchCategories(),
           api.fetchClasses(),
           api.fetchProfile().catch(() => null),
@@ -2053,6 +2262,7 @@ export default function LibraryApp() {
           setBooksList(remoteBooks.length > 0 ? clean(remoteBooks) : initialBooks);
           setMembersList(remoteMembers.length > 0 ? clean(remoteMembers) : initialMembers);
           setLoansList(remoteLoans.length > 0 ? clean(remoteLoans).map((l) => ({ ...l, status: l.status as LoanStatus })) : initialLoans);
+          setReservationsList(remoteReservations.length > 0 ? clean(remoteReservations).map((r) => ({ ...r, status: r.status as ReservationStatus })) : []);
           setCategories(remoteCategories.length > 0 ? remoteCategories : initialCategories);
           setClasses(remoteClasses.length > 0 ? remoteClasses : initialClasses);
           if (remoteProfile) setProfile((current) => ({ ...current, ...clean([remoteProfile])[0] }));
@@ -2092,16 +2302,52 @@ export default function LibraryApp() {
   // Persist avatar shape to remote
   useEffect(() => {
     if (!catalogHydrated) return;
-    const API_URL = process.env.NEXT_PUBLIC_API_URL;
-    if (!API_URL) return;
     void api.saveSetting("avatar-shape", avatarShape).catch(() => undefined);
   }, [avatarShape, catalogHydrated]);
+
+  // Load persisted dark mode setting from remote after hydration
+  useEffect(() => {
+    if (!catalogHydrated) return;
+    let active = true;
+    void api.fetchSetting("dark-mode").then((stored) => {
+      if (!active) return;
+      if (stored === "light" || stored === "dark" || stored === "auto") setThemeMode(stored);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [catalogHydrated]);
+
+  // Resolve effective dark mode
+  const [prefersDark, setPrefersDark] = useState(() =>
+    typeof window !== "undefined" && window.matchMedia("(prefers-color-scheme: dark)").matches
+  );
+  const isDark = themeMode === "dark" || (themeMode === "auto" && prefersDark);
+
+  // Listen for OS preference changes when mode is "auto"
+  useEffect(() => {
+    if (themeMode !== "auto") return;
+    const mql = window.matchMedia("(prefers-color-scheme: dark)");
+    const handler = () => setPrefersDark(mql.matches);
+    handler();
+    mql.addEventListener("change", handler);
+    return () => mql.removeEventListener("change", handler);
+  }, [themeMode]);
+
+  // Persist local storage for instant load on next visit
+  useEffect(() => {
+    try { window.localStorage.setItem(DARK_MODE_STORAGE_KEY, themeMode); } catch { /* ignore */ }
+  }, [themeMode]);
+
+  // Persist dark mode setting to remote
+  useEffect(() => {
+    if (!catalogHydrated) return;
+    void api.saveSetting("dark-mode", themeMode).catch(() => undefined);
+  }, [themeMode, catalogHydrated]);
 
   const addCategory = (name: string) => {
     const normalized = name.trim();
     if (!normalized || categories.some((category) => category.toLowerCase() === normalized.toLowerCase())) return false;
     setCategories((current) => [...current, normalized]);
-    if (process.env.NEXT_PUBLIC_API_URL) void api.createCategory(normalized).catch(() => undefined);
+    void api.createCategory(normalized).catch(() => undefined);
     return true;
   };
 
@@ -2109,20 +2355,20 @@ export default function LibraryApp() {
     const used = [...booksList, ...ebooksList].some((item) => item.category.toLowerCase() === name.toLowerCase());
     if (used) return false;
     setCategories((current) => current.filter((category) => category !== name));
-    if (process.env.NEXT_PUBLIC_API_URL) void api.deleteCategory(name).catch(() => undefined);
+    void api.deleteCategory(name).catch(() => undefined);
     return true;
   };
 
   const addEbook = async (ebook: EBook, file: File) => {
     await storeLibraryFile(ebook.fileId!, file, true);
-    if (api.isRemoteConfigured()) await api.createEbook(ebook);
+    await api.createEbook(ebook).catch(() => undefined);
     setEbooksList((current) => [...current, ebook]);
     setEbookModalOpen(false);
   };
 
   const updateEbook = async (nextEbook: EBook, file?: File) => {
     if (file && nextEbook.fileId) await storeLibraryFile(nextEbook.fileId, file, true);
-    if (api.isRemoteConfigured()) await api.updateEbook(nextEbook);
+    await api.updateEbook(nextEbook).catch(() => undefined);
     setEbooksList((current) => current.map((ebook) => ebook.code === nextEbook.code ? nextEbook : ebook));
     setEbookToEdit(null);
   };
@@ -2135,24 +2381,24 @@ export default function LibraryApp() {
       } catch {
         // Lanjutkan menghapus metadata meskipun file sudah tidak ada.
       }
-      if (api.isRemoteConfigured()) await api.deleteFile(ebook.fileId).catch(() => undefined);
+      await api.deleteFile(ebook.fileId).catch(() => undefined);
     }
     clearReadingProgress(ebook.code);
-    if (api.isRemoteConfigured()) await api.deleteEbook(ebook.code);
+    await api.deleteEbook(ebook.code).catch(() => undefined);
     setEbooksList((current) => current.filter((item) => item.code !== ebook.code));
     setEbookToEdit((current) => current?.code === ebook.code ? null : current);
   };
 
   const addBook = async (book: Book, cover?: File) => {
     if (cover && book.coverId) await storeLibraryFile(book.coverId, cover);
-    if (api.isRemoteConfigured()) await api.createBook(book);
+    await api.createBook(book).catch(() => undefined);
     setBooksList((current) => [...current, book]);
     setBookModalOpen(false);
   };
 
   const updateBook = async (nextBook: Book, cover?: File) => {
     if (cover && nextBook.coverId) await storeLibraryFile(nextBook.coverId, cover);
-    if (api.isRemoteConfigured()) await api.updateBook(nextBook);
+    await api.updateBook(nextBook).catch(() => undefined);
     setBooksList((current) => current.map((book) => book.code === nextBook.code ? nextBook : book));
     setBookToEdit(null);
   };
@@ -2170,22 +2416,20 @@ export default function LibraryApp() {
       } catch {
         // Lanjutkan menghapus metadata meskipun file cover sudah tidak ada.
       }
-      if (api.isRemoteConfigured()) await api.deleteFile(book.coverId).catch(() => undefined);
+      await api.deleteFile(book.coverId).catch(() => undefined);
     }
-    if (api.isRemoteConfigured()) await api.deleteBook(book.code);
+    await api.deleteBook(book.code).catch(() => undefined);
     setBooksList((current) => current.filter((item) => item.code !== book.code));
     setBookToEdit((current) => current?.code === book.code ? null : current);
   };
 
   const addMember = (member: Member) => {
     setMembersList((current) => [...current, member]);
-    if (api.isRemoteConfigured()) {
-      void (async () => {
-        const remoteMember = { ...member, avatarData: await moveAvatarToRemote(`member-avatar:${member.code}`, member.avatarData) };
-        await api.createMember(remoteMember);
-        setMembersList((current) => current.map((item) => item.code === member.code ? remoteMember : item));
-      })().catch(() => undefined);
-    }
+    void (async () => {
+      const remoteMember = { ...member, avatarData: await moveAvatarToRemote(`member-avatar:${member.code}`, member.avatarData) };
+      await api.createMember(remoteMember);
+      setMembersList((current) => current.map((item) => item.code === member.code ? remoteMember : item));
+    })().catch(() => undefined);
     setMemberModalOpen(false);
   };
 
@@ -2220,15 +2464,13 @@ export default function LibraryApp() {
     });
     if (addedMembers.length > 0) {
       setMembersList((current) => [...current, ...addedMembers]);
-      if (api.isRemoteConfigured()) {
-        void (async () => {
-          for (const member of addedMembers) {
-            const remoteMember = { ...member, avatarData: await moveAvatarToRemote(`member-avatar:${member.code}`, member.avatarData) };
-            await api.createMember(remoteMember);
-            setMembersList((current) => current.map((item) => item.code === member.code ? remoteMember : item));
-          }
-        })().catch(() => undefined);
-      }
+      void (async () => {
+        for (const member of addedMembers) {
+          const remoteMember = { ...member, avatarData: await moveAvatarToRemote(`member-avatar:${member.code}`, member.avatarData) };
+          await api.createMember(remoteMember);
+          setMembersList((current) => current.map((item) => item.code === member.code ? remoteMember : item));
+        }
+      })().catch(() => undefined);
     }
     return { added: addedMembers.length, errors };
   };
@@ -2237,15 +2479,13 @@ export default function LibraryApp() {
     const previousMember = membersList.find((member) => member.code === nextMember.code);
     setMembersList((current) => current.map((member) => member.code === nextMember.code ? nextMember : member));
     setLoansList((current) => current.map((loan) => loan.memberCode === nextMember.code ? { ...loan, member: nextMember.name, avatar: nextMember.initials, color: nextMember.color, avatarData: nextMember.avatarData } : loan));
-    if (api.isRemoteConfigured()) {
-      void (async () => {
-        if (!nextMember.avatarData && previousMember?.avatarData) await api.deleteFile(`member-avatar:${nextMember.code}`).catch(() => undefined);
-        const remoteMember = { ...nextMember, avatarData: await moveAvatarToRemote(`member-avatar:${nextMember.code}`, nextMember.avatarData) };
-        await api.updateMember(remoteMember);
-        setMembersList((current) => current.map((member) => member.code === nextMember.code ? remoteMember : member));
-        setLoansList((current) => current.map((loan) => loan.memberCode === nextMember.code ? { ...loan, avatarData: remoteMember.avatarData } : loan));
-      })().catch(() => undefined);
-    }
+    void (async () => {
+      if (!nextMember.avatarData && previousMember?.avatarData) await api.deleteFile(`member-avatar:${nextMember.code}`).catch(() => undefined);
+      const remoteMember = { ...nextMember, avatarData: await moveAvatarToRemote(`member-avatar:${nextMember.code}`, nextMember.avatarData) };
+      await api.updateMember(remoteMember);
+      setMembersList((current) => current.map((member) => member.code === nextMember.code ? remoteMember : member));
+      setLoansList((current) => current.map((loan) => loan.memberCode === nextMember.code ? { ...loan, avatarData: remoteMember.avatarData } : loan));
+    })().catch(() => undefined);
     setMemberToEdit(null);
   };
 
@@ -2253,14 +2493,14 @@ export default function LibraryApp() {
     const normalized = name.trim();
     if (!normalized || classes.some((item) => item.toLowerCase() === normalized.toLowerCase())) return false;
     setClasses((current) => [...current, normalized]);
-    if (process.env.NEXT_PUBLIC_API_URL) void api.createClass(normalized).catch(() => undefined);
+    void api.createClass(normalized).catch(() => undefined);
     return true;
   };
 
   const deleteClass = (name: string) => {
     if (membersList.some((member) => member.role === "Siswa" && member.className.toLowerCase() === name.toLowerCase())) return false;
     setClasses((current) => current.filter((item) => item !== name));
-    if (process.env.NEXT_PUBLIC_API_URL) void api.deleteClass(name).catch(() => undefined);
+    void api.deleteClass(name).catch(() => undefined);
     return true;
   };
 
@@ -2271,10 +2511,8 @@ export default function LibraryApp() {
       return;
     }
     if (!window.confirm(`Hapus anggota “${member.name}”? Riwayat transaksi yang sudah selesai tetap dipertahankan.`)) return;
-    if (api.isRemoteConfigured()) {
-      await api.deleteMember(member.code);
-      await api.deleteFile(`member-avatar:${member.code}`).catch(() => undefined);
-    }
+    await api.deleteMember(member.code).catch(() => undefined);
+    await api.deleteFile(`member-avatar:${member.code}`).catch(() => undefined);
     setMembersList((current) => current.filter((item) => item.code !== member.code));
     setMemberToEdit((current) => current?.code === member.code ? null : current);
   };
@@ -2286,10 +2524,8 @@ export default function LibraryApp() {
     const loan: Loan = { id: `loan-${Date.now()}`, member: member.name, memberCode: member.code, book: book.title, bookCode: book.code, borrowed: formatLoanDate(data.borrowedDate), borrowedDate: data.borrowedDate, due: formatLoanDate(data.dueDate), dueDate: data.dueDate, status: "Dipinjam", avatar: member.initials, color: member.color, avatarData: member.avatarData };
     setBooksList((current) => current.map((item) => item.code === book.code ? { ...item, available: item.available - 1 } : item));
     setLoansList((current) => [...current, loan]);
-    if (process.env.NEXT_PUBLIC_API_URL) {
-      void api.createLoan(loan).catch(() => undefined);
-      void api.updateBook({ code: book.code, available: book.available - 1 }).catch(() => undefined);
-    }
+    void api.createLoan(loan).catch(() => undefined);
+    void api.updateBook({ code: book.code, available: book.available - 1 }).catch(() => undefined);
     setModalOpen(false);
     return true;
   };
@@ -2298,23 +2534,80 @@ export default function LibraryApp() {
     if (getLoanStatus(loan) === "Dikembalikan") return;
     setLoansList((current) => current.map((item) => item.id === loan.id ? { ...item, status: "Dikembalikan", returnedDate: dateInputValue() } : item));
     setBooksList((current) => current.map((item) => item.code === loan.bookCode ? { ...item, available: Math.min(item.stock, item.available + 1) } : item));
-    if (process.env.NEXT_PUBLIC_API_URL) {
-      void api.returnLoan(loan.id).catch(() => undefined);
-    }
+    void api.returnLoan(loan.id).catch(() => undefined);
+
+    // Check for reservations and notify the first one
+    void (async () => {
+      try {
+        const reservations = await api.fetchReservations();
+        const bookReservations = reservations
+          .filter((r) => r.bookCode === loan.bookCode && r.status === "Menunggu")
+          .sort((a, b) => a.reservedAt.localeCompare(b.reservedAt));
+        if (bookReservations.length > 0) {
+          const firstReservation = bookReservations[0];
+          await api.updateReservation(firstReservation.id, { status: "Tersedia" });
+          await api.notifyReservation(firstReservation.id);
+          setReservationsList((current) => current.map((r) =>
+            r.id === firstReservation.id ? { ...r, status: "Tersedia" as ReservationStatus } : r
+          ));
+        }
+      } catch {
+        // Reservation notification failed silently
+      }
+    })();
+  };
+
+  const addReservation = (data: { memberCode: string; bookCode: string }) => {
+    const member = membersList.find((item) => item.code === data.memberCode && item.status === "Aktif");
+    const book = booksList.find((item) => item.code === data.bookCode);
+    if (!member || !book) return false;
+
+    // Check for existing active reservation
+    const existing = reservationsList.find(
+      (r) => r.memberCode === data.memberCode && r.bookCode === data.bookCode && r.status === "Menunggu"
+    );
+    if (existing) return false;
+
+    const reservation: Reservation = {
+      id: `res-${Date.now()}`,
+      member: member.name,
+      memberCode: member.code,
+      book: book.title,
+      bookCode: book.code,
+      reservedAt: dateInputValue(),
+      status: "Menunggu",
+      avatar: member.initials,
+      color: member.color,
+      avatarData: member.avatarData,
+    };
+
+    setReservationsList((current) => [...current, reservation]);
+    void api.createReservation(reservation).catch(() => undefined);
+    return true;
+  };
+
+  const cancelReservation = (reservation: Reservation) => {
+    setReservationsList((current) => current.filter((r) => r.id !== reservation.id));
+    void api.deleteReservation(reservation.id).catch(() => undefined);
+  };
+
+  const fulfillReservation = (reservation: Reservation) => {
+    setReservationsList((current) => current.map((r) =>
+      r.id === reservation.id ? { ...r, status: "Selesai" as ReservationStatus } : r
+    ));
+    void api.updateReservation(reservation.id, { status: "Selesai" }).catch(() => undefined);
   };
 
   const saveProfile = (nextProfile: ProfileData) => {
     const hadAvatar = Boolean(profile.avatarData);
     setProfile(nextProfile);
     setProfileOpen(false);
-    if (api.isRemoteConfigured()) {
-      void (async () => {
-        if (!nextProfile.avatarData && hadAvatar) await api.deleteFile("profile-avatar").catch(() => undefined);
-        const remoteProfile = { ...nextProfile, avatarData: await moveAvatarToRemote("profile-avatar", nextProfile.avatarData) };
-        await api.updateProfile(remoteProfile);
-        setProfile((current) => ({ ...current, avatarData: remoteProfile.avatarData }));
-      })().catch(() => undefined);
-    }
+    void (async () => {
+      if (!nextProfile.avatarData && hadAvatar) await api.deleteFile("profile-avatar").catch(() => undefined);
+      const remoteProfile = { ...nextProfile, avatarData: await moveAvatarToRemote("profile-avatar", nextProfile.avatarData) };
+      await api.updateProfile(remoteProfile);
+      setProfile((current) => ({ ...current, avatarData: remoteProfile.avatarData }));
+    })().catch(() => undefined);
   };
 
   const navigate = (page: PageKey) => { setActivePage(page); setSidebarOpen(false); setNotificationsOpen(false); };
@@ -2326,7 +2619,7 @@ export default function LibraryApp() {
   const lowStockCount = booksList.filter((book) => book.available <= 2).length;
   const pageTitle = activePage === "settings" ? "Pengaturan" : navItems.find((item) => item.key === activePage)?.label ?? "Ringkasan";
 
-  return <div className={`app-shell avatar-shape-${avatarShape}`}>
-    <aside className={`sidebar ${sidebarOpen ? "sidebar-open" : ""}`}><div className="brand"><span className="brand-mark"><span /><span /><span /></span><span>Al-Haytham <span className="brand-accent">Library</span></span></div><div className="sidebar-label">MENU UTAMA</div><nav>{navItems.map((item) => <button key={item.key} className={`nav-item ${activePage === item.key ? "active" : ""}`} onClick={() => navigate(item.key)}><Icon name={item.icon} size={19} /><span>{item.label}</span>{item.key === "loans" && <em>{activeLoanCount}</em>}</button>)}</nav><div className="sidebar-label sidebar-secondary">LAINNYA</div><nav><button className={`nav-item ${activePage === "settings" ? "active" : ""}`} onClick={() => navigate("settings")}><Icon name="sliders" size={19} /><span>Pengaturan</span></button></nav><div className="sidebar-bottom"><div className="help-card"><div className="help-spark">✦</div><strong>Butuh bantuan?</strong><span>Pelajari cara menggunakan Al-Haytham Library.</span><button type="button" onClick={() => setGuideOpen(true)}>Mulai panduan <span>→</span></button></div>        <button className="user-card" onClick={() => setProfileOpen(true)} aria-label="Edit profil"><span className="avatar user-avatar">{profile.avatarData ? <img src={profile.avatarData} alt={`Foto ${profile.name}`} /> : getInitials(profile.name)}</span><span><b>{profile.name}</b><small>{profile.role === "student" ? "Siswa" : profile.detail}</small></span><Icon name="more" size={18} /></button></div></aside>
-    <main className="main-content"><header className="topbar"><button className="mobile-menu icon-button" onClick={() => setSidebarOpen(!sidebarOpen)} aria-label="Buka menu"><Icon name="menu" size={21} /></button><div className="breadcrumb"><span>Perpustakaan</span><b>/</b><strong>{pageTitle}</strong></div><div className="topbar-actions"><label className="top-search"><Icon name="search" size={17} /><input placeholder="Cari apa saja..." /></label><div className="notification-wrap"><button className="notification-button" aria-label="Notifikasi" aria-expanded={notificationsOpen} onClick={() => setNotificationsOpen(!notificationsOpen)}><Icon name="bell" size={20} /><span /></button>{notificationsOpen && <NotificationPanel onNavigate={navigate} onClose={() => setNotificationsOpen(false)} overdueCount={overdueLoanCount} lowStockCount={lowStockCount} />}</div><button className="top-avatar" onClick={() => setProfileOpen(true)} aria-label="Edit profil">{profile.avatarData ? <img src={profile.avatarData} alt={`Foto ${profile.name}`} /> : getInitials(profile.name)}</button></div></header><div key={activePage} className="page-content">{activePage === "overview" && <Overview booksList={booksList} ebooksList={ebooksList} membersList={membersList} loansList={loansList} onNavigate={navigate} onQuickLoan={() => setModalOpen(true)} />}{activePage === "ebooks" && <EBooksPage ebooks={ebooksList} categories={categories} onAdd={() => setEbookModalOpen(true)} storageWarning={storageWarning} isAdmin={profile.role === "staff"} onRead={(ebook) => setReadingEbook(ebook)} onEdit={(ebook) => setEbookToEdit(ebook)} onDelete={(ebook) => { void deleteEbook(ebook); }} />}{activePage === "books" && <BooksPage booksList={booksList} categories={categories} onAdd={() => setBookModalOpen(true)} isAdmin={profile.role === "staff"} onEdit={(book) => setBookToEdit(book)} onDelete={(book) => { void deleteBook(book); }} />}{activePage === "members" && <MembersPage membersList={membersList} classes={classes} onAdd={() => setMemberModalOpen(true)} onEdit={setMemberToEdit} onDelete={deleteMember} onAddClass={() => setClassModalOpen(true)} onImportStudents={() => setStudentImportOpen(true)} onDownloadTemplate={() => downloadStudentTemplate(classes)} />}{activePage === "loans" && <LoansPage loansList={loansList} onQuickLoan={() => setModalOpen(true)} onReturnLoan={returnLoan} />}{activePage === "settings" && <SettingsPage categories={categories} avatarShape={avatarShape} onAvatarShapeChange={setAvatarShape} onAddCategory={addCategory} onDeleteCategory={deleteCategory} />}</div></main>{modalOpen && <QuickLoanModal membersList={membersList} booksList={booksList} onClose={() => setModalOpen(false)} onAddLoan={addLoan} />}{ebookModalOpen && <AddEbookModal nextCode={nextEbookCode} categories={categories} onClose={() => setEbookModalOpen(false)} onAdd={addEbook} />}{ebookToEdit && <EditEbookModal ebook={ebookToEdit} categories={categories} onClose={() => setEbookToEdit(null)} onSave={updateEbook} />}{readingEbook && <FlipbookReader ebook={readingEbook} onClose={() => setReadingEbook(null)} />}{bookModalOpen && <AddBookModal nextCode={nextBookCode} categories={categories} onClose={() => setBookModalOpen(false)} onAdd={addBook} />}{bookToEdit && <EditBookModal book={bookToEdit} categories={categories} onClose={() => setBookToEdit(null)} onSave={updateBook} />}{memberModalOpen && <AddMemberModal nextCodes={nextMemberCodes} existingMembers={membersList} classes={classes} onClose={() => setMemberModalOpen(false)} onAdd={addMember} />}{memberToEdit && <EditMemberModal member={memberToEdit} existingMembers={membersList} classes={classes} onClose={() => setMemberToEdit(null)} onSave={updateMember} />}{classModalOpen && <AddClassModal classes={classes} onClose={() => setClassModalOpen(false)} onAdd={addClass} onDelete={deleteClass} />}{studentImportOpen && <ImportStudentsModal classes={classes} onClose={() => setStudentImportOpen(false)} onImport={importStudents} />}{guideOpen && <GuideModal onClose={() => setGuideOpen(false)} onNavigate={navigate} />}{profileOpen && <ProfileModal profile={profile} onClose={() => setProfileOpen(false)} onSave={saveProfile} onLogout={() => { if (window.confirm("Apakah Anda yakin ingin keluar?")) { localStorage.clear(); router.push("/login"); } }} />}</div>;
+  return <div className={`app-shell avatar-shape-${avatarShape} ${isDark ? "dark-mode" : ""}`}>
+    <aside className={`sidebar ${sidebarOpen ? "sidebar-open" : ""}`}><div className="brand"><img src="/logo.png" alt="Al-Haytham Library" className="brand-logo" width="36" height="36" /><span>Al-Haytham <span className="brand-accent">Library</span></span></div><div className="sidebar-label">MENU UTAMA</div><nav>{navItems.map((item) => <button key={item.key} className={`nav-item ${activePage === item.key ? "active" : ""}`} onClick={() => navigate(item.key)}><Icon name={item.icon} size={19} /><span>{item.label}</span>{item.key === "loans" && <em>{activeLoanCount}</em>}</button>)}</nav><div className="sidebar-label sidebar-secondary">LAINNYA</div><nav><button className={`nav-item ${activePage === "settings" ? "active" : ""}`} onClick={() => navigate("settings")}><Icon name="sliders" size={19} /><span>Pengaturan</span></button></nav><div className="sidebar-bottom"><div className="help-card"><div className="help-spark">✦</div><strong>Butuh bantuan?</strong><span>Pelajari cara menggunakan Al-Haytham Library.</span><button type="button" onClick={() => setGuideOpen(true)}>Mulai panduan <span>→</span></button></div>        <button className="user-card" onClick={() => setProfileOpen(true)} aria-label="Edit profil"><span className="avatar user-avatar">{profile.avatarData ? <img src={profile.avatarData} alt={`Foto ${profile.name}`} /> : getInitials(profile.name)}</span><span><b>{profile.name}</b><small>{profile.role === "student" ? "Siswa" : profile.detail}</small></span><Icon name="more" size={18} /></button></div></aside>
+    <main className="main-content"><header className="topbar"><button className="mobile-menu icon-button" onClick={() => setSidebarOpen(!sidebarOpen)} aria-label="Buka menu"><Icon name="menu" size={21} /></button><div className="breadcrumb"><span>Perpustakaan</span><b>/</b><strong>{pageTitle}</strong></div><div className="topbar-actions"><label className="top-search"><Icon name="search" size={17} /><input placeholder="Cari apa saja..." /></label><div className="notification-wrap"><button className="notification-button" aria-label="Notifikasi" aria-expanded={notificationsOpen} onClick={() => setNotificationsOpen(!notificationsOpen)}><Icon name="bell" size={20} /><span /></button>{notificationsOpen && <NotificationPanel onNavigate={navigate} onClose={() => setNotificationsOpen(false)} overdueCount={overdueLoanCount} lowStockCount={lowStockCount} readyReservations={reservationsList.filter((r) => r.status === "Tersedia")} />}</div><button className="top-avatar" onClick={() => setProfileOpen(true)} aria-label="Edit profil">{profile.avatarData ? <img src={profile.avatarData} alt={`Foto ${profile.name}`} /> : getInitials(profile.name)}</button></div></header><div key={activePage} className="page-content">{activePage === "overview" && <Overview booksList={booksList} ebooksList={ebooksList} membersList={membersList} loansList={loansList} onNavigate={navigate} onQuickLoan={() => setModalOpen(true)} />}{activePage === "ebooks" && <EBooksPage ebooks={ebooksList} categories={categories} onAdd={() => setEbookModalOpen(true)} storageWarning={storageWarning} isAdmin={profile.role === "staff"} onRead={(ebook) => setReadingEbook(ebook)} onEdit={(ebook) => setEbookToEdit(ebook)} onDelete={(ebook) => { void deleteEbook(ebook); }} />}{activePage === "books" && <BooksPage booksList={booksList} categories={categories} onAdd={() => setBookModalOpen(true)} isAdmin={profile.role === "staff"} onEdit={(book) => setBookToEdit(book)} onDelete={(book) => { void deleteBook(book); }} onReserve={(bookCode) => addReservation({ memberCode: profile.role === "staff" ? membersList[0]?.code : profile.detail, bookCode })} reservationsList={reservationsList} />}{activePage === "members" && <MembersPage membersList={membersList} classes={classes} onAdd={() => setMemberModalOpen(true)} onEdit={setMemberToEdit} onDelete={deleteMember} onAddClass={() => setClassModalOpen(true)} onImportStudents={() => setStudentImportOpen(true)} onDownloadTemplate={() => downloadStudentTemplate(classes)} />}{activePage === "loans" && <LoansPage loansList={loansList} onQuickLoan={() => setModalOpen(true)} onReturnLoan={returnLoan} />}{activePage === "reports" && <ReportsPage booksList={booksList} membersList={membersList} loansList={loansList} />}{activePage === "reservations" && <ReservationsPage reservationsList={reservationsList} booksList={booksList} membersList={membersList} onCancel={cancelReservation} onFulfill={fulfillReservation} />}{activePage === "settings" && <SettingsPage categories={categories} avatarShape={avatarShape} onAvatarShapeChange={setAvatarShape} themeMode={themeMode} onThemeModeChange={setThemeMode} onAddCategory={addCategory} onDeleteCategory={deleteCategory} />}</div></main>{modalOpen && <QuickLoanModal membersList={membersList} booksList={booksList} onClose={() => setModalOpen(false)} onAddLoan={addLoan} />}{ebookModalOpen && <AddEbookModal nextCode={nextEbookCode} categories={categories} onClose={() => setEbookModalOpen(false)} onAdd={addEbook} />}{ebookToEdit && <EditEbookModal ebook={ebookToEdit} categories={categories} onClose={() => setEbookToEdit(null)} onSave={updateEbook} />}{readingEbook && <FlipbookReader ebook={readingEbook} onClose={() => setReadingEbook(null)} />}{bookModalOpen && <AddBookModal nextCode={nextBookCode} categories={categories} onClose={() => setBookModalOpen(false)} onAdd={addBook} />}{bookToEdit && <EditBookModal book={bookToEdit} categories={categories} onClose={() => setBookToEdit(null)} onSave={updateBook} />}{memberModalOpen && <AddMemberModal nextCodes={nextMemberCodes} existingMembers={membersList} classes={classes} onClose={() => setMemberModalOpen(false)} onAdd={addMember} />}{memberToEdit && <EditMemberModal member={memberToEdit} existingMembers={membersList} classes={classes} onClose={() => setMemberToEdit(null)} onSave={updateMember} />}{classModalOpen && <AddClassModal classes={classes} onClose={() => setClassModalOpen(false)} onAdd={addClass} onDelete={deleteClass} />}{studentImportOpen && <ImportStudentsModal classes={classes} onClose={() => setStudentImportOpen(false)} onImport={importStudents} />}{guideOpen && <GuideModal onClose={() => setGuideOpen(false)} onNavigate={navigate} />}{profileOpen && <ProfileModal profile={profile} onClose={() => setProfileOpen(false)} onSave={saveProfile} onLogout={() => { if (window.confirm("Apakah Anda yakin ingin keluar?")) { localStorage.clear(); router.push("/login"); } }} />}</div>;
 }
