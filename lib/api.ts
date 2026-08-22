@@ -237,6 +237,44 @@ export async function saveSetting(key: string, value: string): Promise<void> {
   await request(`/api/settings/${encodeURIComponent(key)}`, { method: "PUT", body: JSON.stringify({ value }) });
 }
 
+/* ── Reservations API ─────────────────────────────────────── */
+
+export type ReservationStatus = "Menunggu" | "Tersedia" | "Selesai" | "Dibatalkan";
+
+export type Reservation = {
+  id: string;
+  member: string;
+  memberCode: string;
+  book: string;
+  bookCode: string;
+  reservedAt: string;
+  status: ReservationStatus;
+  notifiedAt?: string;
+  avatar: string;
+  color: string;
+  avatarData?: string;
+};
+
+export async function fetchReservations(): Promise<Reservation[]> {
+  return request<Reservation[]>("/api/reservations");
+}
+
+export async function createReservation(reservation: Reservation): Promise<Reservation> {
+  return request<Reservation>("/api/reservations", { method: "POST", body: JSON.stringify(reservation) });
+}
+
+export async function deleteReservation(id: string): Promise<void> {
+  await request(`/api/reservations/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function updateReservation(id: string, updates: Partial<Reservation>): Promise<void> {
+  await request(`/api/reservations/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(updates) });
+}
+
+export async function notifyReservation(id: string): Promise<void> {
+  await request(`/api/reservations/${encodeURIComponent(id)}/notify`, { method: "POST" });
+}
+
 /* ── Seed API ──────────────────────────────────────────────── */
 
 export async function seedDatabase(data: {

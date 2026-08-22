@@ -89,3 +89,17 @@ export const settings = pgTable("settings", {
   key: text("key").primaryKey(),
   value: text("value").notNull(),
 });
+
+export const reservations = pgTable("reservations", {
+  id: text("id").primaryKey(),
+  member: text("member").notNull(),
+  memberCode: text("member_code").notNull(),
+  book: text("book").notNull(),
+  bookCode: text("book_code").notNull(),
+  reservedAt: text("reserved_at").notNull(),
+  status: text("status").notNull().default("Menunggu"),
+  notifiedAt: text("notified_at"),
+  avatar: text("avatar").notNull().default(""),
+  color: text("color").notNull().default("#cfe4da"),
+  avatarData: text("avatar_data"),
+});
