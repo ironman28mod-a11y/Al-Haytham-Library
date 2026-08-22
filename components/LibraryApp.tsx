@@ -2244,6 +2244,7 @@ export default function LibraryApp() {
     let active = true;
     const hydrateCatalog = async () => {
       try {
+        setStorageWarning("");
         const [remoteEbooks, remoteBooks, remoteMembers, remoteLoans, remoteReservations, remoteCategories, remoteClasses, remoteProfile, storedAvatarShape] = await Promise.all([
           api.fetchEbooks(),
           api.fetchBooks(),
