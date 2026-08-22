@@ -11,6 +11,13 @@ self.addEventListener("install", (event) => {
   );
 });
 
+/* Handle skip-waiting message from client. */
+self.addEventListener("message", (event) => {
+  if (event.data && event.data.type === "SKIP_WAITING") {
+    self.skipWaiting();
+  }
+});
+
 /* Activate: bersihkan cache lama dan langsung menguasai halaman. */
 self.addEventListener("activate", (event) => {
   event.waitUntil(
