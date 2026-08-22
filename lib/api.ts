@@ -6,28 +6,39 @@
  * if the API is hosted on a separate domain.
  */
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
+const CONFIGURED_API_BASE = (process.env.NEXT_PUBLIC_API_URL ?? "").trim().replace(/\/$/, "");
+
+// The application API is served by the same Next.js deployment. Always use
+// relative URLs in the browser so a stale/misconfigured public env var cannot
+// send requests to the wrong host.
+function apiBase() {
+  return typeof window === "undefined" ? CONFIGURED_API_BASE : "";
+}
 
 export function isRemoteConfigured() {
-  return Boolean(API_BASE);
+  return Boolean(apiBase() || typeof window !== "undefined");
 }
 
 export function fileUrl(id: string) {
-  return `${API_BASE}/api/files/${encodeURIComponent(id)}`;
+  return `${apiBase()}/api/files/${encodeURIComponent(id)}`;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const url = `${API_BASE}${path}`;
+  const url = `${apiBase()}${path}`;
   const res = await fetch(url, {
     ...init,
+    cache: "no-store",
     headers: {
       "Content-Type": "application/json",
       ...init?.headers,
     },
   });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(body.error ?? `API error ${res.status}`);
+    const body = await res.json().catch(() => null) as { error?: unknown } | null;
+    const message = typeof body?.error === "string" && body.error.trim()
+      ? body.error.trim()
+      : `API error ${res.status}${res.statusText ? `: ${res.statusText}` : ""}`;
+    throw new Error(message);
   }
   return res.json() as Promise<T>;
 }
