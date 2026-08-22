@@ -2392,20 +2392,39 @@ export default function LibraryApp() {
 
   const addEbook = async (ebook: EBook, file: File) => {
     await storeLibraryFile(ebook.fileId!, file, true);
-    await api.createEbook(ebook).catch(() => undefined);
+    try {
+      await api.createEbook(ebook);
+    } catch (err) {
+      console.error("Gagal menyimpan E-Book:", err);
+      addToast(`E-Book gagal tersimpan ke database: ${err instanceof Error ? err.message : "coba lagi"}.`, "error");
+      return;
+    }
     setEbooksList((current) => [...current, ebook]);
     setEbookModalOpen(false);
   };
 
   const updateEbook = async (nextEbook: EBook, file?: File) => {
     if (file && nextEbook.fileId) await storeLibraryFile(nextEbook.fileId, file, true);
-    await api.updateEbook(nextEbook).catch(() => undefined);
+    try {
+      await api.updateEbook(nextEbook);
+    } catch (err) {
+      console.error("Gagal memperbarui E-Book:", err);
+      addToast(`Perubahan E-Book gagal tersimpan ke database: ${err instanceof Error ? err.message : "coba lagi"}.`, "error");
+      return;
+    }
     setEbooksList((current) => current.map((ebook) => ebook.code === nextEbook.code ? nextEbook : ebook));
     setEbookToEdit(null);
   };
 
   const deleteEbook = async (ebook: EBook) => {
     if (!window.confirm(`Hapus E-Book “${ebook.title}”? File yang tersimpan juga akan dihapus.`)) return;
+    try {
+      await api.deleteEbook(ebook.code);
+    } catch (err) {
+      console.error("Gagal menghapus E-Book:", err);
+      addToast(`E-Book gagal dihapus dari database: ${err instanceof Error ? err.message : "coba lagi"}.`, "error");
+      return;
+    }
     if (ebook.fileId) {
       try {
         await deleteBrowserFile(ebook.fileId);
@@ -2415,7 +2434,6 @@ export default function LibraryApp() {
       await api.deleteFile(ebook.fileId).catch(() => undefined);
     }
     clearReadingProgress(ebook.code);
-    await api.deleteEbook(ebook.code).catch(() => undefined);
     setEbooksList((current) => current.filter((item) => item.code !== ebook.code));
     setEbookToEdit((current) => current?.code === ebook.code ? null : current);
   };
