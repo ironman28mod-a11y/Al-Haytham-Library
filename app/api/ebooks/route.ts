@@ -37,11 +37,12 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true }, { status: 201 });
   } catch (err) {
     console.error("POST /api/ebooks error:", err);
-    const pgError = err as { code?: string; cause?: { code?: string } };
+    const pgError = err as { code?: string; cause?: { code?: string; message?: string }; message?: string };
     const errorCode = pgError?.code ?? pgError?.cause?.code;
     if (errorCode === "23505") {
       return NextResponse.json({ error: "Kode E-Book sudah digunakan di database" }, { status: 409 });
     }
-    return NextResponse.json({ error: "Failed to create ebook" }, { status: 500 });
+    const detail = pgError?.cause?.message ?? pgError?.message ?? "kesalahan tidak diketahui";
+    return NextResponse.json({ error: `Gagal menyimpan ke database: ${detail}` }, { status: 500 });
   }
 }
