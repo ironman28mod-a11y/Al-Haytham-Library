@@ -2246,13 +2246,13 @@ export default function LibraryApp() {
       try {
         setStorageWarning("");
         const [remoteEbooks, remoteBooks, remoteMembers, remoteLoans, remoteReservations, remoteCategories, remoteClasses, remoteProfile, storedAvatarShape] = await Promise.all([
-          api.fetchEbooks(),
-          api.fetchBooks(),
-          api.fetchMembers(),
-          api.fetchLoans(),
+          api.fetchEbooks().catch(() => [] as api.EBook[]),
+          api.fetchBooks().catch(() => [] as api.Book[]),
+          api.fetchMembers().catch(() => [] as api.Member[]),
+          api.fetchLoans().catch(() => [] as api.Loan[]),
           api.fetchReservations().catch(() => [] as api.Reservation[]),
-          api.fetchCategories(),
-          api.fetchClasses(),
+          api.fetchCategories().catch(() => [] as string[]),
+          api.fetchClasses().catch(() => [] as string[]),
           api.fetchProfile().catch(() => null),
           api.fetchSetting("avatar-shape").catch(() => null),
         ]);
