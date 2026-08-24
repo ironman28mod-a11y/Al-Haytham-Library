@@ -532,7 +532,7 @@ export default function MemberPortal({ memberCode, onLogout }: { memberCode: str
       </nav>
       <div className="sidebar-bottom">
         <button className="user-card" onClick={() => navigate("settings")} aria-label="Profil akun">
-          <span className="avatar user-avatar" style={{ backgroundColor: displayMember.color }}>{avatarData ? <img src={avatarData} alt="Foto profil" style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "inherit" }} /> : displayMember.initials}</span>
+          <span className="avatar user-avatar" style={{ backgroundColor: displayMember.color }}>{avatarData ? <img key={avatarData} src={avatarData} alt="Foto profil" style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "inherit" }} /> : displayMember.initials}</span>
           <span><b>{displayMember.name}</b><small>{displayMember.code}</small></span>
         </button>
         <button className="nav-item" style={{ marginTop: 10, color: "#b07a74" }} onClick={onLogout}><Icon name="logout" size={19} /><span>Keluar</span></button>
@@ -545,7 +545,7 @@ export default function MemberPortal({ memberCode, onLogout }: { memberCode: str
         <button className="mobile-menu icon-button" onClick={() => setSidebarOpen(!sidebarOpen)} aria-label="Buka menu"><Icon name="menu" size={21} /></button>
         <div className="breadcrumb"><span>Al-Haytham Library</span><b>/</b><strong>{pageTitle}</strong></div>
         <div className="topbar-actions">
-          <button className="top-avatar" style={{ backgroundColor: displayMember.color }} onClick={() => navigate("settings")} aria-label="Profil">{avatarData ? <img src={avatarData} alt="Foto profil" style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "50%" }} /> : displayMember.initials}</button>
+          <button className="top-avatar" style={{ backgroundColor: displayMember.color }} onClick={() => navigate("settings")} aria-label="Profil">{avatarData ? <img key={avatarData} src={avatarData} alt="Foto profil" style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "50%" }} /> : displayMember.initials}</button>
         </div>
       </header>
 
@@ -568,8 +568,8 @@ export default function MemberPortal({ memberCode, onLogout }: { memberCode: str
             <section className="panel activity-panel">
               <div className="panel-heading"><div><h2>Peminjaman aktif</h2><p>Daftar buku yang sedang Anda pinjam</p></div><button className="text-button" onClick={() => navigate("loans")}>Lihat semua</button></div>
               <div className="table-scroll">
-                <table><thead><tr><th>Buku</th><th>Tanggal pinjam</th><th>Jatuh tempo</th><th>Status</th></tr></thead>
-                <tbody>{activeLoans.length > 0 ? activeLoans.map((loan) => <tr key={loan.id}><td>{loan.book}</td><td>{loan.borrowed}</td><td className={getLoanStatus(loan) === "Terlambat" ? "late-text" : ""}>{loan.due}</td><td><StatusPill status={getLoanStatus(loan)} /></td></tr>) : <tr><td colSpan={4} style={{ textAlign: "center", color: "#9aa59f", fontSize: 12, padding: 20 }}>Belum ada peminjaman aktif</td></tr>}</tbody></table>
+                <table><thead><tr><th>Peminjam</th><th>Buku</th><th>Tanggal pinjam</th><th>Jatuh tempo</th><th>Status</th></tr></thead>
+                <tbody>{activeLoans.length > 0 ? activeLoans.map((loan) => <tr key={loan.id}><td><div className="person"><span className="avatar" style={{ backgroundColor: displayMember.color }}>{avatarData ? <img src={avatarData} alt="Foto profil" style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "inherit" }} /> : displayMember.initials}</span><span><b>{loan.member || "Anda"}</b></span></div></td><td>{loan.book}</td><td>{loan.borrowed}</td><td className={getLoanStatus(loan) === "Terlambat" ? "late-text" : ""}>{loan.due}</td><td><StatusPill status={getLoanStatus(loan)} /></td></tr>) : <tr><td colSpan={5} style={{ textAlign: "center", color: "#9aa59f", fontSize: 12, padding: 20 }}>Belum ada peminjaman aktif</td></tr>}</tbody></table>
               </div>
             </section>
             <section className="panel attention-panel">
@@ -593,10 +593,10 @@ export default function MemberPortal({ memberCode, onLogout }: { memberCode: str
         {activePage === "books" && <BooksCatalog books={booksList} onBorrow={handleBorrow} activeLoans={activeLoans} memberCode={memberCode} />}
 
         {/* ===== PEMINJAMAN ===== */}
-        {activePage === "loans" && <LoansPage loans={loansList} onBorrow={() => navigate("books")} />}
+        {activePage === "loans" && <LoansPage loans={loansList} onBorrow={() => navigate("books")} avatarData={avatarData} memberInitials={displayMember.initials} memberColor={displayMember.color} />}
 
         {/* ===== LAPORAN ===== */}
-        {activePage === "reports" && <ReportsPage loans={loansList} books={booksList} memberName={displayMember.name} onExport={exportLoanHistory} />}
+        {activePage === "reports" && <ReportsPage loans={loansList} books={booksList} memberName={displayMember.name} onExport={exportLoanHistory} avatarData={avatarData} memberInitials={displayMember.initials} memberColor={displayMember.color} />}
 
         {/* ===== PENGATURAN ===== */}
         {activePage === "settings" && <SettingsPage member={displayMember} draft={profileDraft} onDraftChange={setProfileDraft} onSave={saveProfile} avatarData={avatarData} avatarReading={avatarReading} avatarError={avatarError} onAvatarChange={handleAvatarChange} onAvatarRemove={removeAvatar} avatarShape={avatarShape} onAvatarShapeChange={setAvatarShape} themeMode={themeMode} onThemeModeChange={setThemeMode} />}
@@ -835,7 +835,7 @@ function BooksCatalog({ books, onBorrow, activeLoans, memberCode }: { books: Por
   </>;
 }
 
-function LoansPage({ loans, onBorrow }: { loans: PortalLoan[]; onBorrow: () => void }) {
+function LoansPage({ loans, onBorrow, avatarData, memberInitials, memberColor }: { loans: PortalLoan[]; onBorrow: () => void; avatarData?: string; memberInitials: string; memberColor: string }) {
   const [tab, setTab] = useState("Semua");
   const tabs = ["Semua", "Dipinjam", "Terlambat", "Dikembalikan"];
   const filtered = loans.filter((l) => tab === "Semua" || getLoanStatus(l) === tab);
@@ -855,15 +855,15 @@ function LoansPage({ loans, onBorrow }: { loans: PortalLoan[]; onBorrow: () => v
         <div className="tabs">{tabs.map((t) => <button key={t} onClick={() => setTab(t)} className={`tab ${tab === t ? "active" : ""}`}>{t}</button>)}</div>
       </div>
       <div className="table-scroll">
-        <table><thead><tr><th>Judul buku</th><th>Tanggal pinjam</th><th>Jatuh tempo</th><th>Status</th></tr></thead>
-        <tbody>{filtered.map((loan) => <tr key={loan.id}><td>{loan.book}</td><td>{loan.borrowed}</td><td className={getLoanStatus(loan) === "Terlambat" ? "late-text" : ""}>{loan.due}</td><td><StatusPill status={getLoanStatus(loan)} /></td></tr>)}</tbody></table>
+        <table><thead><tr><th>Peminjam</th><th>Judul buku</th><th>Tanggal pinjam</th><th>Jatuh tempo</th><th>Status</th></tr></thead>
+        <tbody>{filtered.map((loan) => <tr key={loan.id}><td><div className="person"><span className="avatar" style={{ backgroundColor: memberColor }}>{avatarData ? <img src={avatarData} alt="Foto profil" style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "inherit" }} /> : memberInitials}</span><span><b>{loan.member || "Anda"}</b></span></div></td><td>{loan.book}</td><td>{loan.borrowed}</td><td className={getLoanStatus(loan) === "Terlambat" ? "late-text" : ""}>{loan.due}</td><td><StatusPill status={getLoanStatus(loan)} /></td></tr>)}</tbody></table>
       </div>
       {filtered.length === 0 && <div className="empty-state member-empty"><Icon name="repeat" size={30} /><h3>Belum ada riwayat peminjaman</h3><p>Silakan kunjungi katalog buku untuk meminjam.</p><button className="button button-primary" onClick={onBorrow} style={{ marginTop: 10 }}><Icon name="book" size={14} /> Lihat Katalog Buku</button></div>}
     </section>
   </>;
 }
 
-function ReportsPage({ loans, books, memberName, onExport }: { loans: PortalLoan[]; books: PortalBook[]; memberName: string; onExport: () => void }) {
+function ReportsPage({ loans, books, memberName, onExport, avatarData, memberInitials, memberColor }: { loans: PortalLoan[]; books: PortalBook[]; memberName: string; onExport: () => void; avatarData?: string; memberInitials: string; memberColor: string }) {
   const totalLoans = loans.length;
   const activeLoans = loans.filter((l) => getLoanStatus(l) === "Dipinjam").length;
   const overdueLoans = loans.filter((l) => getLoanStatus(l) === "Terlambat").length;
@@ -888,6 +888,7 @@ function ReportsPage({ loans, books, memberName, onExport }: { loans: PortalLoan
 
   return <>
     <PageHeader title="Laporan" description={`Riwayat peminjaman ${memberName}.`} action={<button className="button button-outline" onClick={onExport}><Icon name="download" size={16} /> Export CSV</button>} />
+    <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16, padding: "10px 14px", background: "#f1f7f3", borderRadius: 8, fontSize: 12 }}><span className="avatar" style={{ backgroundColor: memberColor, width: 32, height: 32, fontSize: 12, flexShrink: 0 }}>{avatarData ? <img src={avatarData} alt="Foto profil" style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "inherit" }} /> : memberInitials}</span><span><b>{memberName}</b><small style={{ display: "block", color: "#729082" }}>Semua data peminjaman pribadi</small></span></div>
     <div className="stat-grid">
       <StatCard icon="repeat" label="Total transaksi" value={String(totalLoans)} accent="green" />
       <StatCard icon="book" label="Buku berbeda" value={String(uniqueBooks)} accent="blue" />
@@ -908,8 +909,8 @@ function ReportsPage({ loans, books, memberName, onExport }: { loans: PortalLoan
       <section className="panel">
         <div className="panel-heading"><div><h2>Riwayat peminjaman</h2><p>Semua transaksi peminjaman Anda</p></div></div>
         <div className="table-scroll">
-          <table><thead><tr><th>Buku</th><th>Tanggal pinjam</th><th>Jatuh tempo</th><th>Status</th></tr></thead>
-          <tbody>{loans.map((loan) => <tr key={loan.id}><td>{loan.book}</td><td>{loan.borrowed}</td><td className={getLoanStatus(loan) === "Terlambat" ? "late-text" : ""}>{loan.due}</td><td><StatusPill status={getLoanStatus(loan)} /></td></tr>)}</tbody></table>
+          <table><thead><tr><th>Peminjam</th><th>Buku</th><th>Tanggal pinjam</th><th>Jatuh tempo</th><th>Status</th></tr></thead>
+          <tbody>{loans.map((loan) => <tr key={loan.id}><td><div className="person"><span className="avatar" style={{ backgroundColor: memberColor }}>{avatarData ? <img src={avatarData} alt="Foto profil" style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "inherit" }} /> : memberInitials}</span><span><b>{loan.member || "Anda"}</b></span></div></td><td>{loan.book}</td><td>{loan.borrowed}</td><td className={getLoanStatus(loan) === "Terlambat" ? "late-text" : ""}>{loan.due}</td><td><StatusPill status={getLoanStatus(loan)} /></td></tr>)}</tbody></table>
         </div>
         {loans.length === 0 && <div className="empty-state member-empty"><Icon name="barChart" size={30} /><h3>Belum ada data</h3><p>Riwayat peminjaman akan muncul di sini.</p></div>}
       </section>
@@ -933,7 +934,7 @@ function SettingsPage({ member, draft, onDraftChange, onSave, avatarData, avatar
         <div className="panel-heading"><div><h2>Profil akun</h2><p>Informasi profil dan foto anggota Anda.</p></div></div>
         <div className="profile-identity" style={{ marginBottom: 18 }}>
           <span className="profile-avatar-large" style={{ backgroundColor: member.color }}>
-            {avatarData ? <img src={avatarData} alt="Foto profil" style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "inherit", display: "block" }} /> : member.initials}
+            {avatarData ? <img key={avatarData} src={avatarData} alt="Foto profil" style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "inherit", display: "block" }} /> : member.initials}
           </span>
           <div>
             <strong>{member.name}</strong>
