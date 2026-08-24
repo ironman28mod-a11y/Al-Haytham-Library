@@ -3,6 +3,7 @@ import {
   isDriveConfigured,
   uploadDriveFile,
   downloadDriveFile,
+  streamDriveFile,
   deleteDriveFile,
   hasDriveFile,
   DriveFileExistsError,
@@ -10,6 +11,8 @@ import {
 import { readFile, writeFile, unlink, mkdir } from "fs/promises";
 import { existsSync } from "fs";
 import path from "path";
+
+export const maxDuration = 300;
 
 const STORAGE_DIR = path.join(process.cwd(), "storage", "files");
 const EBOOK_FILE_PREFIX = "ebook:";
@@ -110,6 +113,20 @@ export async function GET(
 
     // Drive (production / configured)
     if (isDriveConfigured()) {
+      // E-Books are streamed directly to avoid Vercel's 4.5 MB response limit.
+      if (isEbookFile(logicalId)) {
+        const driveRes = await streamDriveFile(logicalId);
+        if (!driveRes) {
+          return NextResponse.json({ error: "File not found" }, { status: 404 });
+        }
+        return new Response(driveRes.body, {
+          status: driveRes.status,
+          headers: {
+            "Content-Type": driveRes.headers.get("content-type") || "application/octet-stream",
+            "Cache-Control": "private, no-store",
+          },
+        });
+      }
       const result = await downloadDriveFile(logicalId);
       if (!result) {
         return NextResponse.json({ error: "File not found" }, { status: 404 });
@@ -117,7 +134,7 @@ export async function GET(
       return new Response(new Uint8Array(result.data), {
         headers: {
           "Content-Type": result.mimeType,
-          "Cache-Control": isEbookFile(logicalId) ? "private, no-store" : "public, max-age=3600",
+          "Cache-Control": "public, max-age=3600",
         },
       });
     }

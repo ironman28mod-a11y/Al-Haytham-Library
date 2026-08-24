@@ -107,10 +107,14 @@ async function dataUrlToBlob(dataUrl: string) {
   return (await fetch(dataUrl)).blob();
 }
 
-async function storeLibraryFile(id: string, file: File, compressLocal = false, replaceExisting = true) {
+async function storeLibraryFile(id: string, file: File, compressLocal = false, replaceExisting = true, onProgress?: (percent: number) => void) {
   const optimized = file.type.startsWith("image/") ? await compressImageFile(file) : file;
   // Upload first so metadata is never created for a file that only exists locally.
-  await api.uploadFile(id, optimized, file.name, { replaceExisting });
+  if (id.startsWith("ebook:")) {
+    await api.uploadFileResumable(id, optimized, file.name, { replaceExisting }, onProgress);
+  } else {
+    await api.uploadFile(id, optimized, file.name, { replaceExisting });
+  }
   await saveBrowserFile(id, optimized, compressLocal && !optimized.type.startsWith("image/"));
   return optimized;
 }
@@ -121,16 +125,16 @@ async function moveAvatarToRemote(id: string, dataUrl?: string) {
   return api.fileUrl(id);
 }
 
-async function loadLibraryFile(id: string, remoteFirst = false) {
+async function loadLibraryFile(id: string, remoteFirst = false, remoteCache: RequestCache = "no-store") {
   if (remoteFirst) {
     // E-Books use Drive as the source of truth; a stale local cache must not mask a missing Drive file.
-    const remote = await api.downloadFile(id).catch(() => null);
+    const remote = await api.downloadFile(id, { cache: remoteCache }).catch(() => null);
     if (remote) void saveBrowserFile(id, remote).catch(() => undefined);
     return remote;
   }
   const local = await loadBrowserFile(id).catch(() => null);
   if (local) return local;
-  const remote = await api.downloadFile(id).catch(() => null);
+  const remote = await api.downloadFile(id, { cache: remoteCache }).catch(() => null);
   if (remote) void saveBrowserFile(id, remote).catch(() => undefined);
   return remote;
 }
@@ -416,13 +420,13 @@ async function migrateLocalFilesToDrive(
       onError?.(`File E-Book “${item.title}” tidak dapat diperiksa di Google Drive: ${error instanceof Error ? error.message : "coba lagi"}.`);
       continue;
     }
+    // Only attempt migration if there is a local file to upload.
+    // If the file is missing from both Drive and local cache (e.g. uploaded
+    // from another device), skip silently — the user can re-upload through Edit.
     const local = await loadBrowserFile(item.fileId).catch(() => null);
-    if (!local) {
-      onError?.(`File E-Book “${item.title}” belum ditemukan di cache perangkat ini. Upload ulang diperlukan.`);
-      continue;
-    }
+    if (!local) continue;
     try {
-      await api.uploadFile(item.fileId, local, item.fileName ?? "ebook");
+      await api.uploadFileResumable(item.fileId, local, item.fileName ?? "ebook");
     } catch (error) {
       onError?.(`File E-Book “${item.title}” gagal dipindahkan ke Google Drive: ${error instanceof Error ? error.message : "coba lagi"}.`);
     }
@@ -682,44 +686,74 @@ function StatusPill({ status }: { status: string }) {
   return <span className={`status-pill ${style}`}><span className="status-dot" />{status}</span>;
 }
 
-function BookCover({ book, small = false }: { book: Pick<Book, "initials" | "color" | "title" | "coverId">; small?: boolean }) {
+function BookCover({ book, small = false }: { book: Pick<Book, "initials" | "color" | "title" | "coverId" | "coverName">; small?: boolean }) {
   const [coverUrl, setCoverUrl] = useState("");
+  const [thumbnailFailed, setThumbnailFailed] = useState(false);
+
+  useEffect(() => {
+    if (!thumbnailFailed || !book.coverId) return;
+    let active = true;
+    let objectUrl = "";
+    loadLibraryFile(book.coverId, false, "force-cache").then((blob) => {
+      if (!active || !blob) return;
+      objectUrl = URL.createObjectURL(blob);
+      setCoverUrl(objectUrl);
+    }).catch(() => undefined);
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [book.coverId, thumbnailFailed]);
+
+  const thumbnail = book.coverId ? api.coverThumbnailUrl(book.coverId, book.coverName ?? "cover") : "";
+  return <div className={`book-cover ${small ? "book-cover-small" : ""}`} style={{ backgroundColor: book.color }}>
+    {!thumbnailFailed && thumbnail ? <img src={thumbnail} alt={`Cover ${book.title}`} loading="lazy" decoding="async" onError={() => setThumbnailFailed(true)} /> : coverUrl ? <img src={coverUrl} alt={`Cover ${book.title}`} /> : <><span>{book.initials}</span><i>{book.title.split(" ")[0]}</i></>}
+  </div>;
+}
+
+function ebookCoverCacheId(ebook: EBook) {
+  return `ebook-cover:${ebook.fileId ?? ebook.code}:${ebook.size}:${ebook.fileName ?? ""}`;
+}
+
+function EbookCover({ ebook }: { ebook: EBook }) {
+  const [coverUrl, setCoverUrl] = useState("");
+  const [thumbnailFailed, setThumbnailFailed] = useState(false);
 
   useEffect(() => {
     let active = true;
     let objectUrl = "";
-    if (book.coverId) {
-      loadLibraryFile(book.coverId).then((blob) => {
-        if (!active || !blob) return;
-        objectUrl = URL.createObjectURL(blob);
-        setCoverUrl(objectUrl);
+    if (thumbnailFailed && ebook.fileId && ebook.format === "PDF") {
+      const cacheId = ebookCoverCacheId(ebook);
+      loadBrowserFile(cacheId).then(async (cached) => {
+        if (!active) return null;
+        if (cached) {
+          objectUrl = URL.createObjectURL(cached);
+          return objectUrl;
+        }
+        const blob = await loadLibraryFile(ebook.fileId as string);
+        if (!active || !blob) return null;
+        const dataUrl = await getPdfCover(ebook.fileId as string, blob);
+        if (dataUrl) {
+          const thumbnail = await dataUrlToBlob(dataUrl).catch(() => null);
+          if (thumbnail) await saveBrowserFile(cacheId, thumbnail).catch(() => undefined);
+        }
+        return dataUrl;
+      }).then((dataUrl) => {
+        if (active && dataUrl) setCoverUrl(dataUrl);
       }).catch(() => undefined);
     }
     return () => {
       active = false;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [book.coverId]);
+  }, [ebook.fileId, ebook.format, ebook.size, ebook.fileName, thumbnailFailed]);
 
-  return <div className={`book-cover ${small ? "book-cover-small" : ""}`} style={{ backgroundColor: book.color }}>{coverUrl ? <img src={coverUrl} alt={`Cover ${book.title}`} /> : <><span>{book.initials}</span><i>{book.title.split(" ")[0]}</i></>}</div>;
-}
-
-function EbookCover({ ebook }: { ebook: EBook }) {
-  const [coverUrl, setCoverUrl] = useState("");
-
-  useEffect(() => {
-    let active = true;
-    if (ebook.fileId && ebook.format === "PDF") {
-      loadLibraryFile(ebook.fileId, true).then((blob) => {
-        if (!active || !blob) return null;
-        return getPdfCover(ebook.fileId as string, blob);
-      }).then((dataUrl) => {
-        if (active && dataUrl) setCoverUrl(dataUrl);
-      }).catch(() => undefined);
-    }
-    return () => { active = false; };
-  }, [ebook.fileId, ebook.format]);
-
+  const thumbnail = ebook.fileId && ebook.format === "PDF"
+    ? api.coverThumbnailUrl(ebook.fileId, `${ebook.size}:${ebook.fileName ?? ""}`)
+    : "";
+  if (!thumbnailFailed && thumbnail) {
+    return <div className="book-cover ebook-cover-image"><img src={thumbnail} alt={`Cover ${ebook.title}`} loading="lazy" decoding="async" onError={() => setThumbnailFailed(true)} /></div>;
+  }
   return coverUrl ? <div className="book-cover ebook-cover-image"><img src={coverUrl} alt={`Cover ${ebook.title}`} /></div> : <BookCover book={ebook} />;
 }
 
@@ -1288,7 +1322,7 @@ function FlipbookReader({ ebook, onClose }: { ebook: EBook; onClose: () => void 
   </div>;
 }
 
-function EditEbookModal({ ebook, categories, onClose, onSave }: { ebook: EBook; categories: string[]; onClose: () => void; onSave: (ebook: EBook, file?: File) => Promise<void> }) {
+function EditEbookModal({ ebook, categories, onClose, onSave }: { ebook: EBook; categories: string[]; onClose: () => void; onSave: (ebook: EBook, file?: File, onProgress?: (percent: number) => void) => Promise<void> }) {
   const [title, setTitle] = useState(ebook.title);
   const [author, setAuthor] = useState(ebook.author);
   const [category, setCategory] = useState(ebook.category);
@@ -1296,10 +1330,12 @@ function EditEbookModal({ ebook, categories, onClose, onSave }: { ebook: EBook; 
   const [file, setFile] = useState<File | null>(null);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(-1);
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = event.target.files?.[0] ?? null;
     setError("");
+    setUploadProgress(-1);
     if (!selectedFile) {
       setFile(null);
       return;
@@ -1322,8 +1358,10 @@ function EditEbookModal({ ebook, categories, onClose, onSave }: { ebook: EBook; 
       return;
     }
     setSaving(true);
+    setError("");
+    setUploadProgress(file ? 0 : -1);
     try {
-      await onSave({ ...ebook, title: title.trim(), author: author.trim(), category: category.trim(), format, size: file ? formatFileSize(file.size) : ebook.size, fileName: file ? file.name : ebook.fileName }, file ?? undefined);
+      await onSave({ ...ebook, title: title.trim(), author: author.trim(), category: category.trim(), format, size: file ? formatFileSize(file.size) : ebook.size, fileName: file ? file.name : ebook.fileName }, file ?? undefined, (percent) => setUploadProgress(percent));
     } catch (error) {
       setError(error instanceof Error ? error.message : "Perubahan tidak dapat disimpan. Silakan coba lagi.");
     } finally {
@@ -1331,10 +1369,10 @@ function EditEbookModal({ ebook, categories, onClose, onSave }: { ebook: EBook; 
     }
   };
 
-  return <div className="modal-backdrop" role="presentation" onClick={onClose}><div className="modal" role="dialog" aria-modal="true" aria-labelledby="ebook-edit-title" onClick={(event) => event.stopPropagation()}><div className="modal-header"><div><span className="eyebrow">EDIT KOLEKSI DIGITAL</span><h2 id="ebook-edit-title">Edit E-Book</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Tutup"><Icon name="close" size={20} /></button></div><form onSubmit={submit}><div className="form-grid ebook-form"><label className="form-span">Judul E-Book<input value={title} onChange={(event) => { setTitle(event.target.value); setError(""); }} placeholder="Contoh: Si Kancil dan Buaya" /></label><label>Penulis<input value={author} onChange={(event) => { setAuthor(event.target.value); setError(""); }} placeholder="Contoh: Tim Penerbit" /></label><label>Kategori<select value={category} onChange={(event) => { setCategory(event.target.value); setError(""); }}><option value="">Pilih kategori</option>{categories.map((item) => <option key={item} value={item}>{item}</option>)}</select></label><label>Format<select value={format} onChange={(event) => setFormat(event.target.value)}><option value="PDF">PDF</option><option value="EPUB">EPUB</option><option value="MOBI">MOBI</option></select></label><label className="form-span file-upload-label">Ganti file (opsional)<input className="file-input" type="file" accept=".pdf,.epub,.mobi,application/pdf,application/epub+zip,application/x-mobipocket-ebook" onChange={handleFileChange} /><span className="file-upload-box"><Icon name="download" size={17} /><span>{file ? file.name : ebook.fileName ?? "Pilih file baru untuk mengganti file saat ini"}<small>{file ? `${formatFileSize(file.size)} · akan menggantikan file lama` : `File saat ini: ${ebook.size}`}</small></span></span></label></div>{error && <div className="form-error"><Icon name="alert" size={16} />{error}</div>}<div className="modal-actions"><button type="button" className="button button-outline" onClick={onClose}>Batal</button><button type="submit" className="button button-primary" disabled={saving}>{saving ? "Menyimpan..." : "Simpan perubahan"}</button></div></form></div></div>;
+  return <div className="modal-backdrop" role="presentation" onClick={onClose}><div className="modal" role="dialog" aria-modal="true" aria-labelledby="ebook-edit-title" onClick={(event) => event.stopPropagation()}><div className="modal-header"><div><span className="eyebrow">EDIT KOLEKSI DIGITAL</span><h2 id="ebook-edit-title">Edit E-Book</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Tutup"><Icon name="close" size={20} /></button></div><form onSubmit={submit}><div className="form-grid ebook-form"><label className="form-span">Judul E-Book<input value={title} onChange={(event) => { setTitle(event.target.value); setError(""); }} placeholder="Contoh: Si Kancil dan Buaya" /></label><label>Penulis<input value={author} onChange={(event) => { setAuthor(event.target.value); setError(""); }} placeholder="Contoh: Tim Penerbit" /></label><label>Kategori<select value={category} onChange={(event) => { setCategory(event.target.value); setError(""); }}><option value="">Pilih kategori</option>{categories.map((item) => <option key={item} value={item}>{item}</option>)}</select></label><label>Format<select value={format} onChange={(event) => setFormat(event.target.value)}><option value="PDF">PDF</option><option value="EPUB">EPUB</option><option value="MOBI">MOBI</option></select></label><label className="form-span file-upload-label">Ganti file (opsional)<input className="file-input" type="file" accept=".pdf,.epub,.mobi,application/pdf,application/epub+zip,application/x-mobipocket-ebook" onChange={handleFileChange} /><span className="file-upload-box"><Icon name="download" size={17} /><span>{file ? file.name : ebook.fileName ?? "Pilih file baru untuk mengganti file saat ini"}<small>{file ? `${formatFileSize(file.size)} · akan menggantikan file lama` : `File saat ini: ${ebook.size}`}</small></span></span></label></div>{uploadProgress >= 0 && uploadProgress < 100 && <div className="upload-progress"><div className="upload-progress-bar"><div className="upload-progress-fill" style={{ width: `${uploadProgress}%` }} /></div><span className="upload-progress-text">{uploadProgress}% — mengunggah ke Google Drive</span></div>}{uploadProgress === 100 && <div className="form-success upload-done"><Icon name="check" size={16} /> File selesai diunggah ke Google Drive ✓</div>}{error && <div className="form-error"><Icon name="alert" size={16} />{error}</div>}<div className="modal-actions"><button type="button" className="button button-outline" onClick={onClose}>Batal</button><button type="submit" className="button button-primary" disabled={saving}>{saving ? "Menyimpan..." : "Simpan perubahan"}</button></div></form></div></div>;
 }
 
-function AddEbookModal({ nextCode, categories, onClose, onAdd }: { nextCode: string; categories: string[]; onClose: () => void; onAdd: (ebook: EBook, file: File) => Promise<void> }) {
+function AddEbookModal({ nextCode, categories, onClose, onAdd }: { nextCode: string; categories: string[]; onClose: () => void; onAdd: (ebook: EBook, file: File, onProgress?: (percent: number) => void) => Promise<void> }) {
   const [title, setTitle] = useState("");
   const [author, setAuthor] = useState("");
   const [category, setCategory] = useState("");
@@ -1343,11 +1381,13 @@ function AddEbookModal({ nextCode, categories, onClose, onAdd }: { nextCode: str
   const [size, setSize] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(-1);
   const ebookColors = ["#dcefe6", "#f5e9d9", "#e8f0df", "#e8e8f8", "#f4e5e2", "#dfeef3"];
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = event.target.files?.[0] ?? null;
     setError("");
+    setUploadProgress(-1);
     if (!selectedFile) {
       setFile(null);
       setSize("");
@@ -1377,8 +1417,10 @@ function AddEbookModal({ nextCode, categories, onClose, onAdd }: { nextCode: str
       return;
     }
     setSaving(true);
+    setError("");
+    setUploadProgress(0);
     try {
-      await onAdd({ title: title.trim(), author: author.trim(), category: category.trim(), code: nextCode, stock: 0, available: 0, color: ebookColors[title.trim().length % ebookColors.length], initials: getInitials(title), format, size: formatFileSize(file.size), access: "Baca online", fileName: file.name, fileId: `ebook:${nextCode}` }, file);
+      await onAdd({ title: title.trim(), author: author.trim(), category: category.trim(), code: nextCode, stock: 0, available: 0, color: ebookColors[title.trim().length % ebookColors.length], initials: getInitials(title), format, size: formatFileSize(file.size), access: "Baca online", fileName: file.name, fileId: `ebook:${nextCode}` }, file, (percent) => setUploadProgress(percent));
     } catch (error) {
       setError(error instanceof Error ? error.message : "File tidak dapat disimpan ke Google Drive. Silakan coba lagi.");
     } finally {
@@ -1386,7 +1428,7 @@ function AddEbookModal({ nextCode, categories, onClose, onAdd }: { nextCode: str
     }
   };
 
-  return <div className="modal-backdrop" role="presentation" onClick={onClose}><div className="modal" role="dialog" aria-modal="true" aria-labelledby="ebook-title" onClick={(event) => event.stopPropagation()}><div className="modal-header"><div><span className="eyebrow">KOLEKSI DIGITAL BARU</span><h2 id="ebook-title">Tambah E-Book</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Tutup"><Icon name="close" size={20} /></button></div><form onSubmit={submit}><div className="form-grid ebook-form"><label className="form-span">Judul E-Book<input value={title} onChange={(event) => { setTitle(event.target.value); setError(""); }} placeholder="Contoh: Si Kancil dan Buaya" /></label><label>Penulis<input value={author} onChange={(event) => { setAuthor(event.target.value); setError(""); }} placeholder="Contoh: Tim Penerbit" /></label><label>Kategori<select value={category} onChange={(event) => { setCategory(event.target.value); setError(""); }}><option value="">Pilih kategori</option>{categories.map((item) => <option key={item} value={item}>{item}</option>)}</select></label><label>Format<select value={format} onChange={(event) => setFormat(event.target.value)}><option value="PDF">PDF</option><option value="EPUB">EPUB</option><option value="MOBI">MOBI</option></select></label><label className="form-span file-upload-label">File E-Book<input className="file-input" type="file" accept=".pdf,.epub,.mobi,application/pdf,application/epub+zip,application/x-mobipocket-ebook" onChange={handleFileChange} /><span className="file-upload-box"><Icon name="download" size={17} /><span>{file ? file.name : "Pilih file PDF, EPUB, atau MOBI"}<small>{file ? `${size} · tersimpan di Google Drive` : "Ukuran besar didukung · tersimpan di Google Drive"}</small></span></span></label></div>{error && <div className="form-error"><Icon name="alert" size={16} />{error}</div>}<div className="modal-actions"><button type="button" className="button button-outline" onClick={onClose}>Batal</button><button type="submit" className="button button-primary" disabled={saving}>{saving ? "Menyimpan..." : "Tambah E-Book"}</button></div></form></div></div>;
+  return <div className="modal-backdrop" role="presentation" onClick={onClose}><div className="modal" role="dialog" aria-modal="true" aria-labelledby="ebook-title" onClick={(event) => event.stopPropagation()}><div className="modal-header"><div><span className="eyebrow">KOLEKSI DIGITAL BARU</span><h2 id="ebook-title">Tambah E-Book</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Tutup"><Icon name="close" size={20} /></button></div><form onSubmit={submit}><div className="form-grid ebook-form"><label className="form-span">Judul E-Book<input value={title} onChange={(event) => { setTitle(event.target.value); setError(""); }} placeholder="Contoh: Si Kancil dan Buaya" /></label><label>Penulis<input value={author} onChange={(event) => { setAuthor(event.target.value); setError(""); }} placeholder="Contoh: Tim Penerbit" /></label><label>Kategori<select value={category} onChange={(event) => { setCategory(event.target.value); setError(""); }}><option value="">Pilih kategori</option>{categories.map((item) => <option key={item} value={item}>{item}</option>)}</select></label><label>Format<select value={format} onChange={(event) => setFormat(event.target.value)}><option value="PDF">PDF</option><option value="EPUB">EPUB</option><option value="MOBI">MOBI</option></select></label><label className="form-span file-upload-label">File E-Book<input className="file-input" type="file" accept=".pdf,.epub,.mobi,application/pdf,application/epub+zip,application/x-mobipocket-ebook" onChange={handleFileChange} /><span className="file-upload-box"><Icon name="download" size={17} /><span>{file ? file.name : "Pilih file PDF, EPUB, atau MOBI"}<small>{file ? `${size} · tersimpan di Google Drive` : "Ukuran besar didukung · tersimpan di Google Drive"}</small></span></span></label></div>{uploadProgress >= 0 && uploadProgress < 100 && <div className="upload-progress"><div className="upload-progress-bar"><div className="upload-progress-fill" style={{ width: `${uploadProgress}%` }} /></div><span className="upload-progress-text">{uploadProgress}% — mengunggah ke Google Drive</span></div>}{uploadProgress === 100 && <div className="form-success upload-done"><Icon name="check" size={16} /> File selesai diunggah ke Google Drive ✓</div>}{error && <div className="form-error"><Icon name="alert" size={16} />{error}</div>}<div className="modal-actions"><button type="button" className="button button-outline" onClick={onClose}>Batal</button><button type="submit" className="button button-primary" disabled={saving}>{saving ? "Menyimpan..." : "Tambah E-Book"}</button></div></form></div></div>;
 }
 
 function AddBookModal({ nextCode, categories, onClose, onAdd }: { nextCode: string; categories: string[]; onClose: () => void; onAdd: (book: Book, cover?: File) => Promise<void> }) {
@@ -2455,8 +2497,8 @@ export default function LibraryApp() {
     return true;
   };
 
-  const addEbook = async (ebook: EBook, file: File) => {
-    await storeLibraryFile(ebook.fileId!, file, true, false);
+  const addEbook = async (ebook: EBook, file: File, onProgress?: (percent: number) => void) => {
+    await storeLibraryFile(ebook.fileId!, file, true, false, onProgress);
     try {
       await api.createEbook(ebook);
     } catch (err) {
@@ -2468,8 +2510,8 @@ export default function LibraryApp() {
     setEbookModalOpen(false);
   };
 
-  const updateEbook = async (nextEbook: EBook, file?: File) => {
-    if (file && nextEbook.fileId) await storeLibraryFile(nextEbook.fileId, file, true, true);
+  const updateEbook = async (nextEbook: EBook, file?: File, onProgress?: (percent: number) => void) => {
+    if (file && nextEbook.fileId) await storeLibraryFile(nextEbook.fileId, file, true, true, onProgress);
     await api.updateEbook(nextEbook);
     setEbooksList((current) => current.map((ebook) => ebook.code === nextEbook.code ? nextEbook : ebook));
     setEbookToEdit(null);

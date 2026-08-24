@@ -23,6 +23,11 @@ export function fileUrl(id: string) {
   return `${apiBase()}/api/files/${encodeURIComponent(id)}`;
 }
 
+export function coverThumbnailUrl(id: string, version = "") {
+  const query = version ? `?v=${encodeURIComponent(version)}` : "";
+  return `${apiBase()}/api/covers/${encodeURIComponent(id)}${query}`;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const url = `${apiBase()}${path}`;
   const res = await fetch(url, {
@@ -125,6 +130,56 @@ export async function uploadFile(id: string, file: Blob, fileName?: string, opti
   }
 }
 
+export async function uploadFileResumable(
+  id: string,
+  file: Blob,
+  fileName?: string,
+  options: { replaceExisting?: boolean } = {},
+  onProgress?: (percent: number) => void,
+): Promise<void> {
+  const initRes = await fetch(`${apiBase()}/api/files/resumable`, {
+    method: "POST",
+    cache: "no-store",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id, fileName, mimeType: file.type || "application/octet-stream", size: file.size, replaceExisting: options.replaceExisting !== false }),
+  });
+  if (!initRes.ok) {
+    const body = await initRes.json().catch(() => null) as { error?: unknown } | null;
+    const detail = typeof body?.error === "string" && body.error.trim() ? `: ${body.error.trim()}` : "";
+    throw new Error(`File upload failed (${initRes.status})${detail}`);
+  }
+  const init = await initRes.json() as { sessionUrl?: string };
+  if (!init.sessionUrl) throw new Error("Google Drive tidak mengembalikan sesi upload.");
+
+  const chunkSize = 2 * 1024 * 1024;
+  let offset = 0;
+  while (offset < file.size || (file.size === 0 && offset === 0)) {
+    const end = file.size === 0 ? 0 : Math.min(file.size, offset + chunkSize) - 1;
+    const chunk = file.slice(offset, end + 1);
+    const res = await fetch(`${apiBase()}/api/files/resumable/${encodeURIComponent(init.sessionUrl)}`, {
+      method: "PUT",
+      cache: "no-store",
+      headers: {
+        "Content-Range": `bytes ${offset}-${end}/${file.size}`,
+        "Content-Type": file.type || "application/octet-stream",
+      },
+      body: chunk,
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null) as { error?: unknown } | null;
+      const detail = typeof body?.error === "string" && body.error.trim() ? `: ${body.error.trim()}` : "";
+      throw new Error(`File upload failed (${res.status})${detail}`);
+    }
+    const result = await res.json() as { complete?: boolean; nextOffset?: number };
+    if (result.complete) {
+      onProgress?.(100);
+      return;
+    }
+    offset = result.nextOffset ?? end + 1;
+    if (file.size > 0) onProgress?.(Math.min(100, Math.round((offset / file.size) * 100)));
+  }
+}
+
 export async function fileExists(id: string): Promise<boolean> {
   const res = await fetch(fileUrl(id), { method: "HEAD", cache: "no-store" });
   if (res.status === 404) return false;
@@ -136,8 +191,8 @@ export async function fileExists(id: string): Promise<boolean> {
   return true;
 }
 
-export async function downloadFile(id: string): Promise<Blob | null> {
-  const res = await fetch(fileUrl(id), { cache: "no-store" });
+export async function downloadFile(id: string, options: { cache?: RequestCache } = {}): Promise<Blob | null> {
+  const res = await fetch(fileUrl(id), { cache: options.cache ?? "no-store" });
   if (res.status === 404) return null;
   if (!res.ok) {
     const body = await res.json().catch(() => null) as { error?: unknown } | null;
