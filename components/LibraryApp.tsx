@@ -2801,6 +2801,7 @@ export default function LibraryApp() {
   };
 
   const saveProfile = (nextProfile: ProfileData) => {
+    const previousProfile = profile;
     const hadAvatar = Boolean(profile.avatarData);
     setProfile(nextProfile);
     setProfileOpen(false);
@@ -2809,7 +2810,10 @@ export default function LibraryApp() {
       const remoteProfile = { ...nextProfile, avatarData: await moveAvatarToRemote("profile-avatar", nextProfile.avatarData) };
       await api.updateProfile(remoteProfile);
       setProfile((current) => ({ ...current, avatarData: remoteProfile.avatarData }));
-    })().catch(() => undefined);
+    })().catch(() => {
+      setProfile(previousProfile);
+      addToast("Gagal menyimpan profil. Silakan coba lagi.", "error");
+    });
   };
 
   const navigate = (page: PageKey) => { setActivePage(page); setSidebarOpen(false); setNotificationsOpen(false); };

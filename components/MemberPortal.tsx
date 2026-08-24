@@ -10,7 +10,7 @@ type PortalEBook = api.EBook;
 type PortalLoan = api.Loan;
 type PortalReservation = api.Reservation;
 
-type MemberPage = "overview" | "ebooks" | "books" | "loans" | "reports" | "settings" | "profile";
+type MemberPage = "overview" | "ebooks" | "books" | "loans" | "reports" | "settings";
 type ThemeMode = "auto" | "light" | "dark";
 
 /* ---------- Browser File Storage (IndexedDB) ---------- */
@@ -326,8 +326,12 @@ export default function MemberPortal({ memberCode, onLogout }: { memberCode: str
   };
 
   // Profile
-  const [profileOpen, setProfileOpen] = useState(false);
   const [profileDraft, setProfileDraft] = useState({ name: "", email: "", phone: "", bio: "" });
+  const [avatarData, setAvatarData] = useState<string | undefined>(undefined);
+  const [avatarName, setAvatarName] = useState<string | undefined>(undefined);
+  const [avatarReading, setAvatarReading] = useState(false);
+  const [avatarError, setAvatarError] = useState("");
+  const [cropSource, setCropSource] = useState<string | null>(null);
 
   // Loan modal
   const [borrowModal, setBorrowModal] = useState<{ book: PortalBook } | null>(null);
@@ -350,7 +354,7 @@ export default function MemberPortal({ memberCode, onLogout }: { memberCode: str
       setLoansList(loans.filter((l) => l.memberCode === memberCode));
       setReservationsList(reservations.filter((r) => r.memberCode === memberCode));
       if (found) {
-        setProfileDraft({ name: found.name, email: "", phone: "", bio: "" });
+        setProfileDraft({ name: found.name, email: found.email || "", phone: found.phone || "", bio: found.bio || "" });
       }
     }).catch(() => {
       if (active) setError("Data portal belum dapat dimuat. Silakan coba lagi.");
@@ -416,9 +420,53 @@ export default function MemberPortal({ memberCode, onLogout }: { memberCode: str
   };
 
   const saveProfile = async () => {
-    setMember((prev) => prev ? { ...prev, name: profileDraft.name } : prev);
+    const updates = { code: memberCode, email: profileDraft.email, phone: profileDraft.phone, bio: profileDraft.bio, avatarData };
+    await api.updateMember(updates).catch(() => undefined);
+    setMember((prev) => prev ? { ...prev, email: profileDraft.email, phone: profileDraft.phone, bio: profileDraft.bio, avatarData } : prev);
     addToast("Profil berhasil disimpan.", "success");
-    setProfileOpen(false);
+  };
+
+  const handleAvatarChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0] ?? null;
+    event.target.value = "";
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setAvatarError("File harus berupa gambar.");
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setAvatarError("Ukuran foto maksimal 5 MB.");
+      return;
+    }
+    setAvatarReading(true);
+    setAvatarError("");
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result as string;
+      if (dataUrl) {
+        setCropSource(dataUrl);
+      } else {
+        setAvatarError("Foto tidak dapat dibaca. Silakan pilih file lain.");
+      }
+      setAvatarReading(false);
+    };
+    reader.onerror = () => {
+      setAvatarError("Foto tidak dapat dibaca. Silakan pilih file lain.");
+      setAvatarReading(false);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const confirmCrop = (dataUrl: string) => {
+    setAvatarData(dataUrl);
+    setAvatarName("avatar-cropped.jpg");
+    setCropSource(null);
+  };
+
+  const removeAvatar = () => {
+    setAvatarData(undefined);
+    setAvatarName(undefined);
+    setAvatarError("");
   };
 
   const exportLoanHistory = () => {
@@ -437,11 +485,10 @@ export default function MemberPortal({ memberCode, onLogout }: { memberCode: str
       <div className="sidebar-label sidebar-secondary">LAINNYA</div>
       <nav>
         <button className={`nav-item ${activePage === "settings" ? "active" : ""}`} onClick={() => navigate("settings")}><Icon name="sliders" size={19} /><span>Pengaturan</span></button>
-        <button className={`nav-item ${activePage === "profile" ? "active" : ""}`} onClick={() => navigate("profile")}><Icon name="user" size={19} /><span>Profil Akun</span></button>
       </nav>
       <div className="sidebar-bottom">
-        <button className="user-card" onClick={() => navigate("profile")} aria-label="Profil akun">
-          <span className="avatar user-avatar" style={{ backgroundColor: displayMember.color }}>{displayMember.initials}</span>
+        <button className="user-card" onClick={() => navigate("settings")} aria-label="Profil akun">
+          <span className="avatar user-avatar" style={{ backgroundColor: displayMember.color }}>{avatarData ? <img src={avatarData} alt="Foto profil" style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "inherit" }} /> : displayMember.initials}</span>
           <span><b>{displayMember.name}</b><small>{displayMember.code}</small></span>
         </button>
         <button className="nav-item" style={{ marginTop: 10, color: "#b07a74" }} onClick={onLogout}><Icon name="logout" size={19} /><span>Keluar</span></button>
@@ -454,7 +501,7 @@ export default function MemberPortal({ memberCode, onLogout }: { memberCode: str
         <button className="mobile-menu icon-button" onClick={() => setSidebarOpen(!sidebarOpen)} aria-label="Buka menu"><Icon name="menu" size={21} /></button>
         <div className="breadcrumb"><span>Al-Haytham Library</span><b>/</b><strong>{pageTitle}</strong></div>
         <div className="topbar-actions">
-          <button className="top-avatar" style={{ backgroundColor: displayMember.color }} onClick={() => navigate("profile")} aria-label="Profil">{displayMember.initials}</button>
+          <button className="top-avatar" style={{ backgroundColor: displayMember.color }} onClick={() => navigate("settings")} aria-label="Profil">{avatarData ? <img src={avatarData} alt="Foto profil" style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "50%" }} /> : displayMember.initials}</button>
         </div>
       </header>
 
@@ -508,10 +555,7 @@ export default function MemberPortal({ memberCode, onLogout }: { memberCode: str
         {activePage === "reports" && <ReportsPage loans={loansList} books={booksList} memberName={displayMember.name} onExport={exportLoanHistory} />}
 
         {/* ===== PENGATURAN ===== */}
-        {activePage === "settings" && <SettingsPage avatarShape={avatarShape} onAvatarShapeChange={setAvatarShape} themeMode={themeMode} onThemeModeChange={setThemeMode} />}
-
-        {/* ===== PROFIL AKUN ===== */}
-        {activePage === "profile" && <ProfilePage member={displayMember} draft={profileDraft} onDraftChange={setProfileDraft} onSave={saveProfile} />}
+        {activePage === "settings" && <SettingsPage member={displayMember} draft={profileDraft} onDraftChange={setProfileDraft} onSave={saveProfile} avatarData={avatarData} avatarReading={avatarReading} avatarError={avatarError} onAvatarChange={handleAvatarChange} onAvatarRemove={removeAvatar} avatarShape={avatarShape} onAvatarShapeChange={setAvatarShape} themeMode={themeMode} onThemeModeChange={setThemeMode} />}
       </div>}
 
       {/* ---- Toasts ---- */}
@@ -519,8 +563,123 @@ export default function MemberPortal({ memberCode, onLogout }: { memberCode: str
 
       {/* ---- Borrow Modal ---- */}
       {borrowModal && <ConfirmDialog title="Pinjam buku" message={`Pinjam "${borrowModal.book.title}" selama 7 hari?`} confirmLabel="Pinjam" onConfirm={() => confirmBorrow(borrowModal.book)} onClose={() => setBorrowModal(null)} />}
+
+      {/* ---- Avatar Crop Modal ---- */}
+      {cropSource && <AvatarCropModal imageUrl={cropSource} preview={{ name: profileDraft.name || displayMember.name, role: "Anggota", detail: `${displayMember.code} · ${displayMember.className}`, color: displayMember.color }} onCancel={() => setCropSource(null)} onConfirm={confirmCrop} />}
     </main>
   </div>;
+}
+
+/* ---------- Avatar Crop Modal ---------- */
+function AvatarCropModal({ imageUrl, preview, onCancel, onConfirm }: { imageUrl: string; preview?: { name: string; role: string; detail: string; color: string }; onCancel: () => void; onConfirm: (dataUrl: string) => void }) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const imgRef = useRef<HTMLImageElement | null>(null);
+  const [zoom, setZoom] = useState(1);
+  const [pos, setPos] = useState({ x: 0, y: 0 });
+  const [ready, setReady] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [source, setSource] = useState(imageUrl);
+  const dragRef = useRef<{ startX: number; startY: number; originX: number; originY: number } | null>(null);
+  const CONTAINER = 280;
+
+  const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+
+  const bounds = (nextZoom: number) => {
+    const img = imgRef.current;
+    if (!img) return { minX: 0, maxX: 0, minY: 0, maxY: 0 };
+    const baseScale = Math.max(CONTAINER / img.naturalWidth, CONTAINER / img.naturalHeight);
+    const scale = baseScale * nextZoom;
+    return { minX: CONTAINER - img.naturalWidth * scale, maxX: 0, minY: CONTAINER - img.naturalHeight * scale, maxY: 0 };
+  };
+
+  const center = (nextZoom: number) => {
+    const b = bounds(nextZoom);
+    return { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 };
+  };
+
+  const handleLoad = () => {
+    setReady(true);
+    setPos(center(zoom));
+  };
+
+  const rotateClockwise = () => {
+    const img = imgRef.current;
+    if (!img || !img.naturalWidth) return;
+    const canvas = document.createElement("canvas");
+    canvas.width = img.naturalHeight;
+    canvas.height = img.naturalWidth;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.translate(canvas.width / 2, canvas.height / 2);
+    ctx.rotate(Math.PI / 2);
+    ctx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
+    setSource(canvas.toDataURL("image/png"));
+    setReady(false);
+  };
+
+  const buildCropped = (size: number) => {
+    const img = imgRef.current;
+    if (!img) return null;
+    const baseScale = Math.max(CONTAINER / img.naturalWidth, CONTAINER / img.naturalHeight);
+    const scale = baseScale * zoom;
+    const srcSize = CONTAINER / scale;
+    const canvas = document.createElement("canvas");
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, size, size);
+    ctx.drawImage(img, -pos.x / scale, -pos.y / scale, srcSize, srcSize, 0, 0, size, size);
+    return canvas.toDataURL("image/jpeg", 0.9);
+  };
+
+  useEffect(() => {
+    if (!ready) return;
+    const url = buildCropped(96);
+    setPreviewUrl(url);
+  }, [zoom, pos, ready, source]);
+
+  const changeZoom = (nextZoom: number) => {
+    const clamped = clamp(nextZoom, 1, 3);
+    const img = imgRef.current;
+    if (img) {
+      const baseScale = Math.max(CONTAINER / img.naturalWidth, CONTAINER / img.naturalHeight);
+      const prevScale = baseScale * zoom;
+      const nextScale = baseScale * clamped;
+      const centerX = (CONTAINER / 2 - pos.x) / prevScale;
+      const centerY = (CONTAINER / 2 - pos.y) / prevScale;
+      const b = bounds(clamped);
+      setPos({ x: clamp(CONTAINER / 2 - centerX * nextScale, b.minX, b.maxX), y: clamp(CONTAINER / 2 - centerY * nextScale, b.minY, b.maxY) });
+    }
+    setZoom(clamped);
+  };
+
+  const onPointerDown = (event: React.PointerEvent) => {
+    dragRef.current = { startX: event.clientX, startY: event.clientY, originX: pos.x, originY: pos.y };
+    (event.target as HTMLElement).setPointerCapture?.(event.pointerId);
+  };
+
+  const onPointerMove = (event: React.PointerEvent) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    const b = bounds(zoom);
+    setPos({ x: clamp(drag.originX + (event.clientX - drag.startX), b.minX, b.maxX), y: clamp(drag.originY + (event.clientY - drag.startY), b.minY, b.maxY) });
+  };
+
+  const onPointerUp = () => { dragRef.current = null; };
+
+  const apply = () => {
+    const url = buildCropped(256);
+    if (url) onConfirm(url);
+  };
+
+  const img = imgRef.current;
+  const baseScale = img ? Math.max(CONTAINER / img.naturalWidth, CONTAINER / img.naturalHeight) : 1;
+  const scale = baseScale * zoom;
+  const displayStyle = img ? { width: img.naturalWidth * scale, height: img.naturalHeight * scale, transform: `translate(${pos.x}px, ${pos.y}px)` } : {};
+
+  return <div className="modal-backdrop crop-backdrop" role="presentation" onClick={onCancel}><div className="modal crop-modal" role="dialog" aria-modal="true" aria-labelledby="crop-title" onClick={(event) => event.stopPropagation()}><div className="modal-header"><div><span className="eyebrow">ATUR FOTO</span><h2 id="crop-title">Potong foto</h2></div><button type="button" className="icon-button" onClick={onCancel} aria-label="Tutup"><Icon name="close" size={20} /></button></div><div className="crop-layout"><div className="crop-left"><div className="crop-stage" ref={containerRef} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}><img ref={imgRef} src={source} alt="Pratinjau foto untuk dipotong" draggable={false} onLoad={handleLoad} style={displayStyle} /></div><div className="crop-zoom"><span>Perbesar</span><input type="range" min={1} max={3} step={0.05} value={zoom} onChange={(event) => changeZoom(Number(event.target.value))} /><span>{Math.round(zoom * 100)}%</span><button type="button" className="crop-rotate" onClick={rotateClockwise} disabled={!ready} aria-label="Putar foto 90 derajat" title="Putar 90°"><Icon name="rotate" size={15} /> Putar</button></div></div>{preview && <div className="crop-right"><span className="crop-preview-label">Pratinjau foto profil</span><div className="crop-card"><div className="crop-card-top">Al-Haytham Library · Profil Anggota</div><div className="crop-card-body"><span className="crop-card-avatar" style={{ backgroundColor: preview.color }}>{previewUrl ? <img src={previewUrl} alt="Pratinjau foto hasil potong" /> : getInitials(preview.name)}</span><div className="crop-card-details"><b>{preview.name || "Nama anggota"}</b><span>{preview.role}</span><small>{preview.detail}</small></div></div></div></div>}</div><p className="crop-hint">Geser foto untuk mengatur posisi, gunakan penggeser untuk memperbesar.</p><div className="modal-actions"><button type="button" className="button button-outline" onClick={onCancel}>Batal</button><button type="button" className="button button-primary" onClick={apply}>Terapkan</button></div></div></div>;
 }
 
 /* ====================== SUB-PAGES ====================== */
@@ -714,7 +873,7 @@ function ReportsPage({ loans, books, memberName, onExport }: { loans: PortalLoan
   </>;
 }
 
-function SettingsPage({ avatarShape, onAvatarShapeChange, themeMode, onThemeModeChange }: { avatarShape: "round" | "square"; onAvatarShapeChange: (s: "round" | "square") => void; themeMode: ThemeMode; onThemeModeChange: (m: ThemeMode) => void }) {
+function SettingsPage({ member, draft, onDraftChange, onSave, avatarData, avatarReading, avatarError, onAvatarChange, onAvatarRemove, avatarShape, onAvatarShapeChange, themeMode, onThemeModeChange }: { member: { name: string; code: string; className: string; initials: string; color: string }; draft: { name: string; email: string; phone: string; bio: string }; onDraftChange: (d: { name: string; email: string; phone: string; bio: string }) => void; onSave: () => void; avatarData?: string; avatarReading: boolean; avatarError: string; onAvatarChange: (e: React.ChangeEvent<HTMLInputElement>) => void; onAvatarRemove: () => void; avatarShape: "round" | "square"; onAvatarShapeChange: (s: "round" | "square") => void; themeMode: ThemeMode; onThemeModeChange: (m: ThemeMode) => void }) {
   const [saved, setSaved] = useState(false);
 
   const save = () => {
@@ -723,8 +882,38 @@ function SettingsPage({ avatarShape, onAvatarShapeChange, themeMode, onThemeMode
   };
 
   return <>
-    <PageHeader title="Pengaturan" description="Atur tampilan dan preferensi portal anggota Anda." />
+    <PageHeader title="Pengaturan" description="Kelola profil, tampilan, dan preferensi portal anggota Anda." />
     <div className="settings-grid">
+      {/* ---- Profil Akun ---- */}
+      <section className="panel settings-panel">
+        <div className="panel-heading"><div><h2>Profil akun</h2><p>Informasi profil dan foto anggota Anda.</p></div></div>
+        <div className="profile-identity" style={{ marginBottom: 18 }}>
+          <span className="profile-avatar-large" style={{ backgroundColor: member.color }}>
+            {avatarData ? <img src={avatarData} alt="Foto profil" style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "inherit", display: "block" }} /> : member.initials}
+          </span>
+          <div>
+            <strong>{member.name}</strong>
+            <small>{member.code} · {member.className}</small>
+            <div className="avatar-actions" style={{ marginTop: 6 }}>
+              <label className="avatar-upload-label">
+                <input className="file-input" type="file" accept="image/*" onChange={onAvatarChange} />
+                <span className="text-button avatar-upload-button"><Icon name="upload" size={13} />{avatarReading ? "Memproses..." : avatarData ? "Ganti foto" : "Upload foto"}</span>
+              </label>
+              {avatarData && <button type="button" className="text-button avatar-remove-button" onClick={onAvatarRemove}>Hapus foto</button>}
+            </div>
+          </div>
+        </div>
+        {avatarError && <div className="form-error"><Icon name="alert" size={16} />{avatarError}</div>}
+        <div className="form-grid settings-form">
+          <label>Nama lengkap<input value={member.name} readOnly disabled style={{ opacity: 0.65, cursor: "not-allowed" }} title="Nama diatur oleh administrator" /></label>
+          <label>Email<input type="email" value={draft.email} onChange={(e) => onDraftChange({ ...draft, email: e.target.value })} placeholder="email@contoh.id" /></label>
+          <label>Nomor telepon<input value={draft.phone} onChange={(e) => onDraftChange({ ...draft, phone: e.target.value })} placeholder="0812 3456 7890" /></label>
+          <label className="form-span">Bio singkat<textarea value={draft.bio} onChange={(e) => onDraftChange({ ...draft, bio: e.target.value })} placeholder="Ceritakan sedikit tentang diri Anda..." rows={3} style={{ width: "100%", border: "1px solid #dce6e1", borderRadius: 7, padding: 10, fontSize: 11, fontFamily: "inherit", resize: "vertical" }} /></label>
+        </div>
+        <div style={{ marginTop: 14 }}><button className="button button-primary" onClick={() => { onSave(); save(); }}><Icon name="check" size={15} /> Simpan profil</button></div>
+      </section>
+
+      {/* ---- Pengaturan Tampilan ---- */}
       <section className="panel settings-panel">
         <div className="panel-heading"><div><h2>Pengaturan tampilan</h2><p>Pilih bentuk avatar untuk foto profil Anda.</p></div></div>
         <div className="avatar-shape-options">
@@ -736,6 +925,8 @@ function SettingsPage({ avatarShape, onAvatarShapeChange, themeMode, onThemeMode
           </button>
         </div>
       </section>
+
+      {/* ---- Tema ---- */}
       <section className="panel settings-panel">
         <div className="panel-heading"><div><h2>Tema tampilan</h2><p>Pilih tema terang, gelap, atau ikuti pengaturan perangkat.</p></div></div>
         <div className="avatar-shape-options">
@@ -750,29 +941,8 @@ function SettingsPage({ avatarShape, onAvatarShapeChange, themeMode, onThemeMode
           </button>
         </div>
       </section>
-    </div>
-    <div className="settings-actions"><span className={saved ? "settings-saved" : "settings-saved hidden"}>Perubahan tersimpan.</span></div>
-  </>;
-}
 
-function ProfilePage({ member, draft, onDraftChange, onSave }: { member: { name: string; code: string; className: string; initials: string; color: string }; draft: { name: string; email: string; phone: string; bio: string }; onDraftChange: (d: { name: string; email: string; phone: string; bio: string }) => void; onSave: () => void }) {
-  return <>
-    <PageHeader title="Profil Akun" description="Kelola informasi profil akun Anda." />
-    <div className="settings-grid">
-      <section className="panel settings-panel">
-        <div className="panel-heading"><div><h2>Informasi akun</h2><p>Detail akun anggota perpustakaan Anda.</p></div></div>
-        <div className="profile-identity" style={{ marginBottom: 18 }}>
-          <span className="profile-avatar-large" style={{ backgroundColor: member.color }}>{member.initials}</span>
-          <div><strong>{member.name}</strong><small>{member.code} · {member.className}</small></div>
-        </div>
-        <div className="form-grid settings-form">
-          <label>Nama lengkap<input value={draft.name} onChange={(e) => onDraftChange({ ...draft, name: e.target.value })} placeholder="Nama lengkap" /></label>
-          <label>Email<input type="email" value={draft.email} onChange={(e) => onDraftChange({ ...draft, email: e.target.value })} placeholder="email@contoh.id" /></label>
-          <label>Nomor telepon<input value={draft.phone} onChange={(e) => onDraftChange({ ...draft, phone: e.target.value })} placeholder="0812 3456 7890" /></label>
-          <label className="form-span">Bio singkat<textarea value={draft.bio} onChange={(e) => onDraftChange({ ...draft, bio: e.target.value })} placeholder="Ceritakan sedikit tentang diri Anda..." rows={3} style={{ width: "100%", border: "1px solid #dce6e1", borderRadius: 7, padding: 10, fontSize: 11, fontFamily: "inherit", resize: "vertical" }} /></label>
-        </div>
-        <div style={{ marginTop: 14 }}><button className="button button-primary" onClick={onSave}><Icon name="check" size={15} /> Simpan profil</button></div>
-      </section>
+      {/* ---- Informasi Keanggotaan ---- */}
       <section className="panel settings-panel">
         <div className="panel-heading"><div><h2>Informasi anggota</h2><p>Detail keanggotaan Anda di perpustakaan.</p></div></div>
         <div style={{ display: "grid", gap: 12, fontSize: 12 }}>
@@ -782,5 +952,6 @@ function ProfilePage({ member, draft, onDraftChange, onSave }: { member: { name:
         </div>
       </section>
     </div>
+    <div className="settings-actions"><span className={saved ? "settings-saved" : "settings-saved hidden"}>Perubahan tersimpan.</span></div>
   </>;
 }

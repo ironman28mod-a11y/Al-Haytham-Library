@@ -44,6 +44,9 @@ export const members = pgTable("members", {
   password: text("password").notNull(),
   avatarData: text("avatar_data"),
   avatarName: text("avatar_name"),
+  email: text("email").notNull().default(""),
+  phone: text("phone").notNull().default(""),
+  bio: text("bio").notNull().default(""),
 });
 
 export const loans = pgTable("loans", {
