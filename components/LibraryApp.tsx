@@ -59,7 +59,7 @@ type Book = {
   coverData?: string;
 };
 
-type EBook = Book & { format: string; size: string; access: string; fileName?: string; fileId?: string; fileData?: string };
+type EBook = Book & { format: string; size: string; access: string; fileName?: string; fileId?: string };
 type TocEntry = { title: string; pageIndex: number | null; children: TocEntry[] };
 type PdfOutlineNode = { title: string; dest: string | Array<unknown> | null; items: PdfOutlineNode[] };
 type BrowserFileRecord = { id: string; blob: Blob; compressed: boolean; originalType: string };
@@ -107,10 +107,11 @@ async function dataUrlToBlob(dataUrl: string) {
   return (await fetch(dataUrl)).blob();
 }
 
-async function storeLibraryFile(id: string, file: File, compressLocal = false) {
+async function storeLibraryFile(id: string, file: File, compressLocal = false, replaceExisting = true) {
   const optimized = file.type.startsWith("image/") ? await compressImageFile(file) : file;
+  // Upload first so metadata is never created for a file that only exists locally.
+  await api.uploadFile(id, optimized, file.name, { replaceExisting });
   await saveBrowserFile(id, optimized, compressLocal && !optimized.type.startsWith("image/"));
-  await api.uploadFile(id, optimized, file.name).catch(() => undefined);
   return optimized;
 }
 
@@ -120,7 +121,13 @@ async function moveAvatarToRemote(id: string, dataUrl?: string) {
   return api.fileUrl(id);
 }
 
-async function loadLibraryFile(id: string) {
+async function loadLibraryFile(id: string, remoteFirst = false) {
+  if (remoteFirst) {
+    // E-Books use Drive as the source of truth; a stale local cache must not mask a missing Drive file.
+    const remote = await api.downloadFile(id).catch(() => null);
+    if (remote) void saveBrowserFile(id, remote).catch(() => undefined);
+    return remote;
+  }
   const local = await loadBrowserFile(id).catch(() => null);
   if (local) return local;
   const remote = await api.downloadFile(id).catch(() => null);
@@ -182,12 +189,6 @@ async function deleteBrowserFile(id: string) {
     transaction.onerror = () => reject(transaction.error ?? new Error("File tidak dapat dihapus."));
   });
   database.close();
-}
-
-async function migrateLegacyFile(id: string, dataUrl: string) {
-  const response = await fetch(dataUrl);
-  const blob = await response.blob();
-  await saveBrowserFile(id, blob, true);
 }
 
 const STATE_DB_NAME = "al-haytham-library-state";
@@ -390,7 +391,13 @@ const initialClasses = ["X IPS 1", "XI IPA 2", "XII IPA 1", "XI IPS 2"];
 type MemberRole = "Admin" | "Guru" | "Siswa";
 type Member = { name: string; code: string; className: string; joined: string; status: string; initials: string; color: string; role: MemberRole; username: string; password: string; avatarData?: string; avatarName?: string };
 
-async function migrateLocalFilesToDrive(books: Book[], ebooks: EBook[], members: Member[], updateMembers: (members: Member[]) => void) {
+async function migrateLocalFilesToDrive(
+  books: Book[],
+  ebooks: EBook[],
+  members: Member[],
+  updateMembers: (members: Member[]) => void,
+  onError?: (message: string) => void
+) {
   let nextMembers = members;
   for (const item of books) {
     if (!item.coverId) continue;
@@ -402,8 +409,23 @@ async function migrateLocalFilesToDrive(books: Book[], ebooks: EBook[], members:
   }
   for (const item of ebooks) {
     if (!item.fileId) continue;
+    try {
+      // Preserve an existing Drive copy; only migrate when the remote file is absent.
+      if (await api.fileExists(item.fileId)) continue;
+    } catch (error) {
+      onError?.(`File E-Book “${item.title}” tidak dapat diperiksa di Google Drive: ${error instanceof Error ? error.message : "coba lagi"}.`);
+      continue;
+    }
     const local = await loadBrowserFile(item.fileId).catch(() => null);
-    if (local) await api.uploadFile(item.fileId, local, item.fileName ?? "ebook");
+    if (!local) {
+      onError?.(`File E-Book “${item.title}” belum ditemukan di cache perangkat ini. Upload ulang diperlukan.`);
+      continue;
+    }
+    try {
+      await api.uploadFile(item.fileId, local, item.fileName ?? "ebook");
+    } catch (error) {
+      onError?.(`File E-Book “${item.title}” gagal dipindahkan ke Google Drive: ${error instanceof Error ? error.message : "coba lagi"}.`);
+    }
   }
   for (const member of members) {
     if (!member.avatarData?.startsWith("data:")) continue;
@@ -688,7 +710,7 @@ function EbookCover({ ebook }: { ebook: EBook }) {
   useEffect(() => {
     let active = true;
     if (ebook.fileId && ebook.format === "PDF") {
-      loadLibraryFile(ebook.fileId).then((blob) => {
+      loadLibraryFile(ebook.fileId, true).then((blob) => {
         if (!active || !blob) return null;
         return getPdfCover(ebook.fileId as string, blob);
       }).then((dataUrl) => {
@@ -855,7 +877,7 @@ function EBooksPage({ ebooks, categories, onAdd, isAdmin, onRead, onEdit, onDele
     setBusyFile(ebook.fileId);
     setFileNotice("");
     try {
-      const blob = await loadLibraryFile(ebook.fileId);
+      const blob = await loadLibraryFile(ebook.fileId, true);
       if (!blob) throw new Error("File tidak ditemukan");
       const objectUrl = URL.createObjectURL(blob);
       const link = document.createElement("a");
@@ -1083,7 +1105,7 @@ function FlipbookReader({ ebook, onClose }: { ebook: EBook; onClose: () => void 
     (async () => {
       try {
         if (!ebook.fileId) throw new Error("File E-Book belum tersedia.");
-        const blob = await loadLibraryFile(ebook.fileId);
+        const blob = await loadLibraryFile(ebook.fileId, true);
         if (!blob) throw new Error("File E-Book tidak ditemukan.");
         const data = new Uint8Array(await blob.arrayBuffer());
         const pdfjs = await getPdfjsModule();
@@ -1302,8 +1324,8 @@ function EditEbookModal({ ebook, categories, onClose, onSave }: { ebook: EBook; 
     setSaving(true);
     try {
       await onSave({ ...ebook, title: title.trim(), author: author.trim(), category: category.trim(), format, size: file ? formatFileSize(file.size) : ebook.size, fileName: file ? file.name : ebook.fileName }, file ?? undefined);
-    } catch {
-      setError("Perubahan tidak dapat disimpan. Silakan coba lagi.");
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Perubahan tidak dapat disimpan. Silakan coba lagi.");
     } finally {
       setSaving(false);
     }
@@ -1357,14 +1379,14 @@ function AddEbookModal({ nextCode, categories, onClose, onAdd }: { nextCode: str
     setSaving(true);
     try {
       await onAdd({ title: title.trim(), author: author.trim(), category: category.trim(), code: nextCode, stock: 0, available: 0, color: ebookColors[title.trim().length % ebookColors.length], initials: getInitials(title), format, size: formatFileSize(file.size), access: "Baca online", fileName: file.name, fileId: `ebook:${nextCode}` }, file);
-    } catch {
-      setError("File tidak dapat dibaca. Silakan pilih file lain.");
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "File tidak dapat disimpan ke Google Drive. Silakan coba lagi.");
     } finally {
       setSaving(false);
     }
   };
 
-  return <div className="modal-backdrop" role="presentation" onClick={onClose}><div className="modal" role="dialog" aria-modal="true" aria-labelledby="ebook-title" onClick={(event) => event.stopPropagation()}><div className="modal-header"><div><span className="eyebrow">KOLEKSI DIGITAL BARU</span><h2 id="ebook-title">Tambah E-Book</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Tutup"><Icon name="close" size={20} /></button></div><form onSubmit={submit}><div className="form-grid ebook-form"><label className="form-span">Judul E-Book<input value={title} onChange={(event) => { setTitle(event.target.value); setError(""); }} placeholder="Contoh: Si Kancil dan Buaya" /></label><label>Penulis<input value={author} onChange={(event) => { setAuthor(event.target.value); setError(""); }} placeholder="Contoh: Tim Penerbit" /></label><label>Kategori<select value={category} onChange={(event) => { setCategory(event.target.value); setError(""); }}><option value="">Pilih kategori</option>{categories.map((item) => <option key={item} value={item}>{item}</option>)}</select></label><label>Format<select value={format} onChange={(event) => setFormat(event.target.value)}><option value="PDF">PDF</option><option value="EPUB">EPUB</option><option value="MOBI">MOBI</option></select></label><label className="form-span file-upload-label">File E-Book<input className="file-input" type="file" accept=".pdf,.epub,.mobi,application/pdf,application/epub+zip,application/x-mobipocket-ebook" onChange={handleFileChange} /><span className="file-upload-box"><Icon name="download" size={17} /><span>{file ? file.name : "Pilih file PDF, EPUB, atau MOBI"}<small>{file ? `${size} · tersimpan di Google Drive + cache lokal` : "Ukuran besar didukung · tersimpan di Google Drive"}</small></span></span></label></div>{error && <div className="form-error"><Icon name="alert" size={16} />{error}</div>}<div className="modal-actions"><button type="button" className="button button-outline" onClick={onClose}>Batal</button><button type="submit" className="button button-primary" disabled={saving}>{saving ? "Menyimpan..." : "Tambah E-Book"}</button></div></form></div></div>;
+  return <div className="modal-backdrop" role="presentation" onClick={onClose}><div className="modal" role="dialog" aria-modal="true" aria-labelledby="ebook-title" onClick={(event) => event.stopPropagation()}><div className="modal-header"><div><span className="eyebrow">KOLEKSI DIGITAL BARU</span><h2 id="ebook-title">Tambah E-Book</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Tutup"><Icon name="close" size={20} /></button></div><form onSubmit={submit}><div className="form-grid ebook-form"><label className="form-span">Judul E-Book<input value={title} onChange={(event) => { setTitle(event.target.value); setError(""); }} placeholder="Contoh: Si Kancil dan Buaya" /></label><label>Penulis<input value={author} onChange={(event) => { setAuthor(event.target.value); setError(""); }} placeholder="Contoh: Tim Penerbit" /></label><label>Kategori<select value={category} onChange={(event) => { setCategory(event.target.value); setError(""); }}><option value="">Pilih kategori</option>{categories.map((item) => <option key={item} value={item}>{item}</option>)}</select></label><label>Format<select value={format} onChange={(event) => setFormat(event.target.value)}><option value="PDF">PDF</option><option value="EPUB">EPUB</option><option value="MOBI">MOBI</option></select></label><label className="form-span file-upload-label">File E-Book<input className="file-input" type="file" accept=".pdf,.epub,.mobi,application/pdf,application/epub+zip,application/x-mobipocket-ebook" onChange={handleFileChange} /><span className="file-upload-box"><Icon name="download" size={17} /><span>{file ? file.name : "Pilih file PDF, EPUB, atau MOBI"}<small>{file ? `${size} · tersimpan di Google Drive` : "Ukuran besar didukung · tersimpan di Google Drive"}</small></span></span></label></div>{error && <div className="form-error"><Icon name="alert" size={16} />{error}</div>}<div className="modal-actions"><button type="button" className="button button-outline" onClick={onClose}>Batal</button><button type="submit" className="button button-primary" disabled={saving}>{saving ? "Menyimpan..." : "Tambah E-Book"}</button></div></form></div></div>;
 }
 
 function AddBookModal({ nextCode, categories, onClose, onAdd }: { nextCode: string; categories: string[]; onClose: () => void; onAdd: (book: Book, cover?: File) => Promise<void> }) {
@@ -2301,7 +2323,15 @@ export default function LibraryApp() {
           setClasses(remoteClasses.length > 0 ? remoteClasses : initialClasses);
           if (remoteProfile) setProfile((current) => ({ ...current, ...clean([remoteProfile])[0] }));
           if (storedAvatarShape === "square" || storedAvatarShape === "round") setAvatarShape(storedAvatarShape);
-          void migrateLocalFilesToDrive(remoteBooks, remoteEbooks, remoteMembers, (nextMembers) => setMembersList(nextMembers)).catch(() => undefined);
+          void migrateLocalFilesToDrive(
+            remoteBooks,
+            remoteEbooks,
+            remoteMembers,
+            (nextMembers) => setMembersList(nextMembers),
+            (message) => addToast(message, "error")
+          ).catch((error) => {
+            addToast(`Migrasi file ke Google Drive gagal: ${error instanceof Error ? error.message : "coba lagi"}.`, "error");
+          });
           if (remoteProfile?.avatarData?.startsWith("data:")) {
             void (async () => {
               const avatarData = await moveAvatarToRemote("profile-avatar", remoteProfile.avatarData);
@@ -2426,27 +2456,21 @@ export default function LibraryApp() {
   };
 
   const addEbook = async (ebook: EBook, file: File) => {
-    await storeLibraryFile(ebook.fileId!, file, true);
+    await storeLibraryFile(ebook.fileId!, file, true, false);
     try {
       await api.createEbook(ebook);
     } catch (err) {
-      console.error("Gagal menyimpan E-Book:", err);
-      addToast(`E-Book gagal tersimpan ke database: ${err instanceof Error ? err.message : "coba lagi"}.`, "error");
-      return;
+      await api.deleteFile(ebook.fileId!).catch(() => undefined);
+      await deleteBrowserFile(ebook.fileId!).catch(() => undefined);
+      throw err;
     }
     setEbooksList((current) => [...current, ebook]);
     setEbookModalOpen(false);
   };
 
   const updateEbook = async (nextEbook: EBook, file?: File) => {
-    if (file && nextEbook.fileId) await storeLibraryFile(nextEbook.fileId, file, true);
-    try {
-      await api.updateEbook(nextEbook);
-    } catch (err) {
-      console.error("Gagal memperbarui E-Book:", err);
-      addToast(`Perubahan E-Book gagal tersimpan ke database: ${err instanceof Error ? err.message : "coba lagi"}.`, "error");
-      return;
-    }
+    if (file && nextEbook.fileId) await storeLibraryFile(nextEbook.fileId, file, true, true);
+    await api.updateEbook(nextEbook);
     setEbooksList((current) => current.map((ebook) => ebook.code === nextEbook.code ? nextEbook : ebook));
     setEbookToEdit(null);
   };
@@ -2454,21 +2478,16 @@ export default function LibraryApp() {
   const deleteEbook = async (ebook: EBook) => {
     if (!window.confirm(`Hapus E-Book “${ebook.title}”? File yang tersimpan juga akan dihapus.`)) return;
     try {
+      // Keep metadata intact if the Drive file cannot be removed.
+      if (ebook.fileId) await api.deleteFile(ebook.fileId);
       await api.deleteEbook(ebook.code);
     } catch (err) {
       console.error("Gagal menghapus E-Book:", err);
-      addToast(`E-Book gagal dihapus dari database: ${err instanceof Error ? err.message : "coba lagi"}.`, "error");
+      addToast(`E-Book gagal dihapus: ${err instanceof Error ? err.message : "coba lagi"}.`, "error");
       return;
     }
-    if (ebook.fileId) {
-      try {
-        await deleteBrowserFile(ebook.fileId);
-      } catch {
-        // Lanjutkan menghapus metadata meskipun file sudah tidak ada.
-      }
-      await api.deleteFile(ebook.fileId).catch(() => undefined);
-    }
-    clearReadingProgress(ebook.code);
+    if (ebook.fileId) await deleteBrowserFile(ebook.fileId).catch(() => undefined);
+    await clearReadingProgress(ebook.code);
     setEbooksList((current) => current.filter((item) => item.code !== ebook.code));
     setEbookToEdit((current) => current?.code === ebook.code ? null : current);
   };

@@ -113,23 +113,47 @@ export type ProfileData = {
 
 /* ── File API ──────────────────────────────────────────────── */
 
-export async function uploadFile(id: string, file: Blob, fileName?: string): Promise<void> {
+export async function uploadFile(id: string, file: Blob, fileName?: string, options: { replaceExisting?: boolean } = {}): Promise<void> {
   const headers = new Headers({ "Content-Type": file.type || "application/octet-stream", "X-File-Size": String(file.size) });
+  if (options.replaceExisting === false) headers.set("x-file-replace", "false");
   if (fileName) headers.set("x-file-name", fileName);
   const res = await fetch(fileUrl(id), { method: "PUT", headers, body: file });
-  if (!res.ok) throw new Error(`File upload failed (${res.status})`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => null) as { error?: unknown } | null;
+    const detail = typeof body?.error === "string" && body.error.trim() ? `: ${body.error.trim()}` : "";
+    throw new Error(`File upload failed (${res.status})${detail}`);
+  }
+}
+
+export async function fileExists(id: string): Promise<boolean> {
+  const res = await fetch(fileUrl(id), { method: "HEAD", cache: "no-store" });
+  if (res.status === 404) return false;
+  if (!res.ok) {
+    const body = await res.json().catch(() => null) as { error?: unknown } | null;
+    const detail = typeof body?.error === "string" && body.error.trim() ? `: ${body.error.trim()}` : "";
+    throw new Error(`File check failed (${res.status})${detail}`);
+  }
+  return true;
 }
 
 export async function downloadFile(id: string): Promise<Blob | null> {
-  const res = await fetch(fileUrl(id));
+  const res = await fetch(fileUrl(id), { cache: "no-store" });
   if (res.status === 404) return null;
-  if (!res.ok) throw new Error(`File download failed (${res.status})`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => null) as { error?: unknown } | null;
+    const detail = typeof body?.error === "string" && body.error.trim() ? `: ${body.error.trim()}` : "";
+    throw new Error(`File download failed (${res.status})${detail}`);
+  }
   return res.blob();
 }
 
 export async function deleteFile(id: string): Promise<void> {
   const res = await fetch(fileUrl(id), { method: "DELETE" });
-  if (!res.ok && res.status !== 404) throw new Error(`File delete failed (${res.status})`);
+  if (!res.ok && res.status !== 404) {
+    const body = await res.json().catch(() => null) as { error?: unknown } | null;
+    const detail = typeof body?.error === "string" && body.error.trim() ? `: ${body.error.trim()}` : "";
+    throw new Error(`File delete failed (${res.status})${detail}`);
+  }
 }
 
 /* ── Books API ─────────────────────────────────────────────── */

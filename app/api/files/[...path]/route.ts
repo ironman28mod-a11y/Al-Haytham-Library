@@ -4,12 +4,26 @@ import {
   uploadDriveFile,
   downloadDriveFile,
   deleteDriveFile,
+  hasDriveFile,
+  DriveFileExistsError,
 } from "@/lib/drive";
 import { readFile, writeFile, unlink, mkdir } from "fs/promises";
 import { existsSync } from "fs";
 import path from "path";
 
 const STORAGE_DIR = path.join(process.cwd(), "storage", "files");
+const EBOOK_FILE_PREFIX = "ebook:";
+
+function isEbookFile(logicalId: string) {
+  return logicalId.startsWith(EBOOK_FILE_PREFIX);
+}
+
+function driveRequiredResponse() {
+  return NextResponse.json(
+    { error: "Penyimpanan E-Book wajib menggunakan Google Drive. Konfigurasi Google Drive belum tersedia." },
+    { status: 503 }
+  );
+}
 
 async function ensureDir() {
   if (!existsSync(STORAGE_DIR)) {
@@ -63,6 +77,26 @@ function mimeTypes(): Record<string, string> {
 
 /* ── Route handlers ── */
 
+export async function HEAD(
+  _req: Request,
+  { params }: { params: Promise<{ path: string[] }> }
+) {
+  try {
+    const { path: pathParts } = await params;
+    const logicalId = pathParts.join("/");
+    if (isEbookFile(logicalId) && !isDriveConfigured()) return driveRequiredResponse();
+    if (isDriveConfigured()) {
+      const exists = await hasDriveFile(logicalId);
+      return new Response(null, { status: exists ? 200 : 404 });
+    }
+    const filePath = path.join(STORAGE_DIR, ...pathParts);
+    return new Response(null, { status: existsSync(filePath) ? 200 : 404 });
+  } catch (err) {
+    console.error("HEAD /api/files error:", err);
+    return NextResponse.json({ error: "Failed to check file" }, { status: 500 });
+  }
+}
+
 export async function GET(
   _req: Request,
   { params }: { params: Promise<{ path: string[] }> }
@@ -70,6 +104,9 @@ export async function GET(
   try {
     const { path: pathParts } = await params;
     const logicalId = pathParts.join("/");
+
+    // E-Books are always read from Drive. Never fall back to ephemeral local storage.
+    if (isEbookFile(logicalId) && !isDriveConfigured()) return driveRequiredResponse();
 
     // Drive (production / configured)
     if (isDriveConfigured()) {
@@ -80,12 +117,12 @@ export async function GET(
       return new Response(new Uint8Array(result.data), {
         headers: {
           "Content-Type": result.mimeType,
-          "Cache-Control": "public, max-age=3600",
+          "Cache-Control": isEbookFile(logicalId) ? "private, no-store" : "public, max-age=3600",
         },
       });
     }
 
-    // Local filesystem fallback
+    // Local filesystem fallback for non-E-Book assets only.
     const filePath = path.join(STORAGE_DIR, ...pathParts);
     const local = await localGet(filePath);
     if (!local) {
@@ -111,23 +148,30 @@ export async function PUT(
     const { path: pathParts } = await params;
     const logicalId = pathParts.join("/");
     const mimeType = req.headers.get("content-type") || "application/octet-stream";
+    const replaceExisting = req.headers.get("x-file-replace") !== "false";
     const arrayBuffer = await req.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
 
+    // E-Books must never be written to the local filesystem.
+    if (isEbookFile(logicalId) && !isDriveConfigured()) return driveRequiredResponse();
+
     // Drive (production / configured)
     if (isDriveConfigured()) {
-      await uploadDriveFile(logicalId, buffer, mimeType);
-      return NextResponse.json({ ok: true, key: logicalId }, { status: 201 });
+      await uploadDriveFile(logicalId, buffer, mimeType, { replaceExisting });
+      return NextResponse.json({ ok: true, key: logicalId, storage: "google-drive" }, { status: 201 });
     }
 
-    // Local filesystem fallback
+    // Local filesystem fallback for non-E-Book assets only.
     await ensureDir();
     const filePath = path.join(STORAGE_DIR, ...pathParts);
     await localPut(filePath, buffer);
     return NextResponse.json({ ok: true, key: logicalId }, { status: 201 });
   } catch (err) {
+    if (err instanceof DriveFileExistsError) {
+      return NextResponse.json({ error: err.message, code: err.code }, { status: 409 });
+    }
     console.error("PUT /api/files error:", err);
-    return NextResponse.json({ error: "Failed to write file" }, { status: 500 });
+    return NextResponse.json({ error: err instanceof Error ? err.message : "Failed to write file" }, { status: 500 });
   }
 }
 
@@ -139,13 +183,16 @@ export async function DELETE(
     const { path: pathParts } = await params;
     const logicalId = pathParts.join("/");
 
+    // E-Books must never be deleted from or checked against local storage.
+    if (isEbookFile(logicalId) && !isDriveConfigured()) return driveRequiredResponse();
+
     // Drive (production / configured)
     if (isDriveConfigured()) {
       await deleteDriveFile(logicalId);
-      return NextResponse.json({ ok: true });
+      return NextResponse.json({ ok: true, storage: "google-drive" });
     }
 
-    // Local filesystem fallback
+    // Local filesystem fallback for non-E-Book assets only.
     const filePath = path.join(STORAGE_DIR, ...pathParts);
     await localDelete(filePath);
     return NextResponse.json({ ok: true });

@@ -74,6 +74,15 @@ export function driveFileName(logicalId: string): string {
 
 type DriveFile = { id: string; name: string; mimeType: string };
 
+export class DriveFileExistsError extends Error {
+  readonly code = "DRIVE_FILE_EXISTS";
+
+  constructor(name: string) {
+    super(`File Google Drive “${name}” sudah ada.`);
+    this.name = "DriveFileExistsError";
+  }
+}
+
 async function findFile(name: string, cfg: NonNullable<ReturnType<typeof getOAuthConfig>>, token: string): Promise<DriveFile | null> {
   const query = `name='${name.replace(/'/g, "\\'")}' and '${cfg.folderId}' in parents and trashed=false`;
   const res = await fetch(
@@ -105,13 +114,15 @@ function multipartBody(metadata: object, media: Buffer, mimeType: string, bounda
 export async function uploadDriveFile(
   logicalId: string,
   media: Buffer,
-  mimeType: string
-): Promise<void> {
+  mimeType: string,
+  options: { replaceExisting?: boolean } = {}
+): Promise<{ created: boolean }> {
   const cfg = getOAuthConfig();
   if (!cfg) throw new Error("Google Drive belum dikonfigurasi (GOOGLE_DRIVE_*).");
   const token = await getAccessToken(cfg);
   const name = driveFileName(logicalId);
   const existing = await findFile(name, cfg, token);
+  if (existing && options.replaceExisting === false) throw new DriveFileExistsError(name);
 
   const boundary = `alhaytham_${Date.now()}_${Math.random().toString(16).slice(2)}`;
   const metadata: Record<string, unknown> = { name, mimeType: mimeType || "application/octet-stream" };
@@ -135,6 +146,15 @@ export async function uploadDriveFile(
     const detail = await res.text().catch(() => "");
     throw new Error(`Google Drive upload gagal (${res.status}): ${detail.slice(0, 300)}`);
   }
+  return { created: !existing };
+}
+
+/** Check whether a file exists without downloading its content. */
+export async function hasDriveFile(logicalId: string): Promise<boolean> {
+  const cfg = getOAuthConfig();
+  if (!cfg) throw new Error("Google Drive belum dikonfigurasi (GOOGLE_DRIVE_*).");
+  const token = await getAccessToken(cfg);
+  return (await findFile(driveFileName(logicalId), cfg, token)) !== null;
 }
 
 /** Download a file by logical id. Returns { data, mimeType } or null if absent. */

@@ -110,17 +110,19 @@ describe('markReservationReady', () => {
 /* ── notifyReservationOnReturn ──────────────────────────── */
 
 describe('notifyReservationOnReturn', () => {
-  let mockApi: {
-    fetchReservations: ReturnType<typeof vi.fn>
-    updateReservation: ReturnType<typeof vi.fn>
-    notifyReservation: ReturnType<typeof vi.fn>
+  type MockApi = {
+    fetchReservations: ReturnType<typeof vi.fn<() => Promise<Reservation[]>>>
+    updateReservation: ReturnType<typeof vi.fn<(id: string, updates: Partial<Reservation>) => Promise<void>>>
+    notifyReservation: ReturnType<typeof vi.fn<(id: string) => Promise<void>>>
   }
+
+  let mockApi: MockApi
 
   beforeEach(() => {
     mockApi = {
-      fetchReservations: vi.fn(),
-      updateReservation: vi.fn(),
-      notifyReservation: vi.fn(),
+      fetchReservations: vi.fn<() => Promise<Reservation[]>>(),
+      updateReservation: vi.fn<(id: string, updates: Partial<Reservation>) => Promise<void>>(),
+      notifyReservation: vi.fn<(id: string) => Promise<void>>(),
     }
   })
 
