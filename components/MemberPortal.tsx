@@ -352,10 +352,13 @@ export default function MemberPortal({ memberCode, onLogout }: { memberCode: str
       setBooksList(books);
       setEbooksList(ebooks);
       setLoansList(loans.filter((l) => l.memberCode === memberCode));
-      setReservationsList(reservations.filter((r) => r.memberCode === memberCode));
-      if (found) {
+      setReservationsList(reservations.filter((r) => r.memberCode === memberCode));        if (found) {
         setProfileDraft({ name: found.name, email: found.email || "", phone: found.phone || "", bio: found.bio || "" });
+        if (found.avatarData) setAvatarData(found.avatarData);
+        if (found.avatarShape === "round" || found.avatarShape === "square") setAvatarShape(found.avatarShape);
+        if (found.themeMode === "light" || found.themeMode === "dark" || found.themeMode === "auto") setThemeMode(found.themeMode);
       }
+      setPrefsLoaded(true);
     }).catch(() => {
       if (active) setError("Data portal belum dapat dimuat. Silakan coba lagi.");
     }).finally(() => {
@@ -380,6 +383,19 @@ export default function MemberPortal({ memberCode, onLogout }: { memberCode: str
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark-mode", themeMode === "dark" || (themeMode === "auto" && typeof window !== "undefined" && window.matchMedia("(prefers-color-scheme: dark)").matches));
+  }, [themeMode]);
+
+  // Persist avatarShape to database when changed
+  const [prefsLoaded, setPrefsLoaded] = useState(false);
+  useEffect(() => {
+    if (!member || !prefsLoaded) return;
+    void api.updateMember({ code: memberCode, avatarShape }).catch(() => undefined);
+  }, [avatarShape]);
+
+  // Persist themeMode to database when changed
+  useEffect(() => {
+    if (!member || !prefsLoaded) return;
+    void api.updateMember({ code: memberCode, themeMode }).catch(() => undefined);
   }, [themeMode]);
 
   /* ---------- Derived ---------- */
@@ -420,10 +436,38 @@ export default function MemberPortal({ memberCode, onLogout }: { memberCode: str
   };
 
   const saveProfile = async () => {
-    const updates = { code: memberCode, email: profileDraft.email, phone: profileDraft.phone, bio: profileDraft.bio, avatarData };
-    await api.updateMember(updates).catch(() => undefined);
-    setMember((prev) => prev ? { ...prev, email: profileDraft.email, phone: profileDraft.phone, bio: profileDraft.bio, avatarData } : prev);
-    addToast("Profil berhasil disimpan.", "success");
+    try {
+      let remoteAvatar = avatarData;
+      // Upload new avatar (data URL) to Google Drive
+      if (avatarData && avatarData.startsWith("data:")) {
+        addToast("Mengunggah foto profil ke Drive...", "info");
+        const blob = await dataUrlToBlob(avatarData);
+        const fileId = `member-avatar:${memberCode}`;
+        await api.uploadFile(fileId, blob, "avatar.jpg");
+        remoteAvatar = api.fileUrl(fileId);
+        setAvatarData(remoteAvatar);
+      }
+      const updates: { code: string; name?: string; email?: string; phone?: string; bio?: string; avatarData?: string } = {
+        code: memberCode,
+        name: profileDraft.name,
+        email: profileDraft.email,
+        phone: profileDraft.phone,
+        bio: profileDraft.bio,
+      };
+      // Only update avatarData if it changed
+      if (remoteAvatar !== (member?.avatarData ?? "")) {
+        updates.avatarData = remoteAvatar;
+      }
+      // If avatar was removed, send empty string to clear it
+      if (!avatarData && member?.avatarData) {
+        updates.avatarData = "";
+      }
+      await api.updateMember(updates).catch(() => undefined);
+      setMember((prev) => prev ? { ...prev, ...updates } : prev);
+      addToast("Profil berhasil disimpan.", "success");
+    } catch {
+      addToast("Gagal menyimpan profil. Silakan coba lagi.", "error");
+    }
   };
 
   const handleAvatarChange = (event: React.ChangeEvent<HTMLInputElement>) => {
