@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import LibraryApp from "../components/LibraryApp";
+import MemberPortal from "../components/MemberPortal";
 
 const AUTH_KEY = "al-haytham-library:auth";
 
@@ -66,19 +67,38 @@ function LoadingScreen() {
 
 export default function Home() {
   const router = useRouter();
-  const [authenticated, setAuthenticated] = useState<boolean | null>(null);
+  const [session, setSession] = useState<{ role: "staff" | "member"; memberCode?: string } | null>(null);
 
   useEffect(() => {
-    const auth = localStorage.getItem(AUTH_KEY);
-    if (auth === "true") {
-      setAuthenticated(true);
-    } else {
+    const rawAuth = localStorage.getItem(AUTH_KEY);
+    if (!rawAuth) {
+      router.replace("/login");
+      return;
+    }
+    try {
+      const parsed = JSON.parse(rawAuth) as { role?: string; memberCode?: string };
+      if (parsed.role === "member" && parsed.memberCode) {
+        setSession({ role: "member", memberCode: parsed.memberCode });
+      } else if (parsed.role === "staff") {
+        setSession({ role: "staff" });
+      } else if (rawAuth === "true") {
+        setSession({ role: "staff" });
+      } else {
+        localStorage.removeItem(AUTH_KEY);
+        router.replace("/login");
+      }
+    } catch {
+      localStorage.removeItem(AUTH_KEY);
       router.replace("/login");
     }
   }, [router]);
 
-  if (authenticated === null) {
+  if (session === null) {
     return <LoadingScreen />;
+  }
+
+  if (session.role === "member" && session.memberCode) {
+    return <MemberPortal memberCode={session.memberCode} onLogout={() => { localStorage.removeItem(AUTH_KEY); router.replace("/login"); }} />;
   }
 
   return <LibraryApp />;
