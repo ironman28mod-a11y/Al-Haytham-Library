@@ -444,7 +444,7 @@ export default function MemberPortal({ memberCode, onLogout }: { memberCode: str
         const blob = await dataUrlToBlob(avatarData);
         const fileId = `member-avatar:${memberCode}`;
         await api.uploadFile(fileId, blob, "avatar.jpg");
-        remoteAvatar = api.fileUrl(fileId);
+        remoteAvatar = `${api.fileUrl(fileId)}?v=${Date.now()}`;
         setAvatarData(remoteAvatar);
       }
       const updates: { code: string; name?: string; email?: string; phone?: string; bio?: string; avatarData?: string } = {
@@ -462,7 +462,7 @@ export default function MemberPortal({ memberCode, onLogout }: { memberCode: str
       if (!avatarData && member?.avatarData) {
         updates.avatarData = "";
       }
-      await api.updateMember(updates).catch(() => undefined);
+      await api.updateMember(updates);
       setMember((prev) => prev ? { ...prev, ...updates } : prev);
       addToast("Profil berhasil disimpan.", "success");
     } catch {

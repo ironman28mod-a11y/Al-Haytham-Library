@@ -87,6 +87,8 @@ export type Member = {
   email?: string;
   phone?: string;
   bio?: string;
+  avatarShape?: string;
+  themeMode?: string;
 };
 
 export type LoanStatus = "Dipinjam" | "Terlambat" | "Dikembalikan";

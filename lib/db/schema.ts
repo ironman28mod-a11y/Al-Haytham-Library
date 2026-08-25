@@ -47,6 +47,8 @@ export const members = pgTable("members", {
   email: text("email").notNull().default(""),
   phone: text("phone").notNull().default(""),
   bio: text("bio").notNull().default(""),
+  avatarShape: text("avatar_shape").notNull().default("round"),
+  themeMode: text("theme_mode").notNull().default("auto"),
 });
 
 export const loans = pgTable("loans", {

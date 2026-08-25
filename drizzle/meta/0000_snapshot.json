@@ -436,6 +436,41 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "email": {
+          "name": "email",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "''"
+        },
+        "phone": {
+          "name": "phone",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "''"
+        },
+        "bio": {
+          "name": "bio",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "''"
+        },
+        "avatar_shape": {
+          "name": "avatar_shape",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'round'"
+        },
+        "theme_mode": {
+          "name": "theme_mode",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'auto'"
         }
       },
       "indexes": {},
