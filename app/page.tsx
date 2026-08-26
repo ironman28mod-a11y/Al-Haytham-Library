@@ -80,7 +80,7 @@ export default function Home() {
       if (parsed.role === "member" && parsed.memberCode) {
         setSession({ role: "member", memberCode: parsed.memberCode });
       } else if (parsed.role === "staff") {
-        setSession({ role: "staff" });
+        setSession({ role: "staff", memberCode: parsed.memberCode || undefined });
       } else if (rawAuth === "true") {
         setSession({ role: "staff" });
       } else {
@@ -101,5 +101,5 @@ export default function Home() {
     return <MemberPortal memberCode={session.memberCode} onLogout={() => { localStorage.removeItem(AUTH_KEY); router.replace("/login"); }} />;
   }
 
-  return <LibraryApp />;
+  return <LibraryApp adminMemberCode={session.memberCode} />;
 }

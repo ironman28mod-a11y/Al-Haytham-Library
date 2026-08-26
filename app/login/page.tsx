@@ -47,7 +47,7 @@ export default function LoginPage() {
         AUTH_KEY,
         JSON.stringify({
           role: data.role,
-          ...(data.memberCode ? { memberCode: data.memberCode } : {}),
+          memberCode: data.memberCode || data.code || null,
         })
       );
       router.push("/");
