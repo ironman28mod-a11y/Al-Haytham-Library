@@ -13,6 +13,7 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [loginError, setLoginError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [remember, setRemember] = useState(false);
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -32,6 +33,7 @@ export default function LoginPage() {
           username: username.trim(),
           password: password.trim(),
           type: role,
+          remember,
         }),
       });
 
@@ -138,7 +140,7 @@ export default function LoginPage() {
               </div>
             </label>
             <div className="login-helper">
-              <label className="check-label"><input type="checkbox" /> <span>Ingat saya</span></label>
+              <label className="check-label"><input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)} /> <span>Ingat saya</span></label>
               <button type="button">Lupa password?</button>
             </div>
             {loginError && <p className="login-error" role="alert">{loginError}</p>}

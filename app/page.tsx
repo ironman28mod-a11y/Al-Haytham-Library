@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import LibraryApp from "../components/LibraryApp";
 import MemberPortal from "../components/MemberPortal";
+import { logout } from "../lib/api";
 
 const AUTH_KEY = "al-haytham-library:auth";
 
@@ -98,7 +99,7 @@ export default function Home() {
   }
 
   if (session.role === "member" && session.memberCode) {
-    return <MemberPortal memberCode={session.memberCode} onLogout={() => { localStorage.removeItem(AUTH_KEY); router.replace("/login"); }} />;
+    return <MemberPortal memberCode={session.memberCode} onLogout={() => { void logout(); localStorage.removeItem(AUTH_KEY); router.replace("/login"); }} />;
   }
 
   return <LibraryApp adminMemberCode={session.memberCode} />;

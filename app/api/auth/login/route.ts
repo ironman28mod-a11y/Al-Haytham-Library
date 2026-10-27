@@ -2,14 +2,21 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { members } from "@/lib/db/schema";
 import { eq, or } from "drizzle-orm";
+import {
+  REMEMBER_TTL_SECONDS,
+  createSessionToken,
+  getSessionSecret,
+  sessionCookie,
+} from "@/lib/session";
 
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { username, password, type } = body as {
+    const { username, password, type, remember } = body as {
       username?: string;
       password?: string;
       type?: "staff" | "member";
+      remember?: boolean;
     };
 
     if (!username || !password) {
@@ -64,12 +71,15 @@ export async function POST(req: Request) {
           { status: 403 }
         );
       }
-      return NextResponse.json({
-        ok: true,
-        role: "staff",
-        name: member.name,
-        code: member.code,
-      });
+      return sessionResponse(
+        await buildSessionCookie(member.code, "staff", member.name, remember === true),
+        {
+          ok: true,
+          role: "staff",
+          name: member.name,
+          code: member.code,
+        },
+      );
     }
 
     // Member login — Guru and Siswa allowed
@@ -80,17 +90,45 @@ export async function POST(req: Request) {
       );
     }
 
-    return NextResponse.json({
-      ok: true,
-      role: "member",
-      memberCode: member.code,
-      name: member.name,
-    });
+    return sessionResponse(
+      await buildSessionCookie(member.code, "member", member.name, remember === true),
+      {
+        ok: true,
+        role: "member",
+        memberCode: member.code,
+        name: member.name,
+      },
+    );
   } catch (err) {
     console.error("POST /api/auth/login error:", err);
+
     return NextResponse.json(
       { error: "Gagal melakukan login. Silakan coba lagi." },
       { status: 500 }
     );
   }
+}
+
+/** Buat header cookie sesi; gagal keras bila rahasia sesi belum dikonfigurasi. */
+async function buildSessionCookie(
+  code: string,
+  role: "staff" | "member",
+  name: string,
+  remember: boolean,
+): Promise<string> {
+  const secret = getSessionSecret();
+  if (!secret) {
+    throw new Error(
+      "SESSION_SECRET belum diatur — sesi login tidak dapat dibuat.",
+    );
+  }
+  const ttl = remember ? REMEMBER_TTL_SECONDS : undefined;
+  const token = await createSessionToken({ code, role, name }, secret, ttl);
+  return sessionCookie(token, remember);
+}
+
+function sessionResponse(cookie: string, payload: Record<string, unknown>) {
+  const res = NextResponse.json(payload);
+  res.headers.set("Set-Cookie", cookie);
+  return res;
 }

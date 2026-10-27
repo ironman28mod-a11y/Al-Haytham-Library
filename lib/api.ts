@@ -28,9 +28,40 @@ export function coverThumbnailUrl(id: string, version = "") {
   return `${apiBase()}/api/covers/${encodeURIComponent(id)}${query}`;
 }
 
+const AUTH_STORAGE_KEY = "al-haytham-library:auth";
+
+/** Sesi berakhir (401): bersihkan login lokal lalu kembali ke halaman masuk. */
+function handleUnauthorized() {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(AUTH_STORAGE_KEY);
+  } catch {
+    /* localStorage tidak tersedia */
+  }
+  if (!window.location.pathname.startsWith("/login")) {
+    window.location.assign("/login");
+  }
+}
+
+/** fetch yang mengenali 401 (cookie sesi kedaluwarsa atau sudah dihapus). */
+async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const res = await fetch(input, init);
+  if (res.status === 401) handleUnauthorized();
+  return res;
+}
+
+/** Akhiri sesi di server (menghapus cookie sesi). */
+export async function logout(): Promise<void> {
+  try {
+    await fetch(`${apiBase()}/api/auth/logout`, { method: "POST", cache: "no-store" });
+  } catch {
+    /* logout lokal tetap dilanjutkan */
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const url = `${apiBase()}${path}`;
-  const res = await fetch(url, {
+  const res = await apiFetch(url, {
     ...init,
     cache: "no-store",
     headers: {
@@ -127,7 +158,7 @@ export async function uploadFile(id: string, file: Blob, fileName?: string, opti
   const headers = new Headers({ "Content-Type": file.type || "application/octet-stream", "X-File-Size": String(file.size) });
   if (options.replaceExisting === false) headers.set("x-file-replace", "false");
   if (fileName) headers.set("x-file-name", fileName);
-  const res = await fetch(fileUrl(id), { method: "PUT", headers, body: file });
+  const res = await apiFetch(fileUrl(id), { method: "PUT", headers, body: file });
   if (!res.ok) {
     const body = await res.json().catch(() => null) as { error?: unknown } | null;
     const detail = typeof body?.error === "string" && body.error.trim() ? `: ${body.error.trim()}` : "";
@@ -142,7 +173,7 @@ export async function uploadFileResumable(
   options: { replaceExisting?: boolean } = {},
   onProgress?: (percent: number) => void,
 ): Promise<void> {
-  const initRes = await fetch(`${apiBase()}/api/files/resumable`, {
+  const initRes = await apiFetch(`${apiBase()}/api/files/resumable`, {
     method: "POST",
     cache: "no-store",
     headers: { "Content-Type": "application/json" },
@@ -161,7 +192,7 @@ export async function uploadFileResumable(
   while (offset < file.size || (file.size === 0 && offset === 0)) {
     const end = file.size === 0 ? 0 : Math.min(file.size, offset + chunkSize) - 1;
     const chunk = file.slice(offset, end + 1);
-    const res = await fetch(`${apiBase()}/api/files/resumable/${encodeURIComponent(init.sessionUrl)}`, {
+    const res = await apiFetch(`${apiBase()}/api/files/resumable/${encodeURIComponent(init.sessionUrl)}`, {
       method: "PUT",
       cache: "no-store",
       headers: {
@@ -186,7 +217,7 @@ export async function uploadFileResumable(
 }
 
 export async function fileExists(id: string): Promise<boolean> {
-  const res = await fetch(fileUrl(id), { method: "HEAD", cache: "no-store" });
+  const res = await apiFetch(fileUrl(id), { method: "HEAD", cache: "no-store" });
   if (res.status === 404) return false;
   if (!res.ok) {
     const body = await res.json().catch(() => null) as { error?: unknown } | null;
@@ -197,7 +228,7 @@ export async function fileExists(id: string): Promise<boolean> {
 }
 
 export async function downloadFile(id: string, options: { cache?: RequestCache } = {}): Promise<Blob | null> {
-  const res = await fetch(fileUrl(id), { cache: options.cache ?? "no-store" });
+  const res = await apiFetch(fileUrl(id), { cache: options.cache ?? "no-store" });
   if (res.status === 404) return null;
   if (!res.ok) {
     const body = await res.json().catch(() => null) as { error?: unknown } | null;
@@ -208,7 +239,7 @@ export async function downloadFile(id: string, options: { cache?: RequestCache }
 }
 
 export async function deleteFile(id: string): Promise<void> {
-  const res = await fetch(fileUrl(id), { method: "DELETE" });
+  const res = await apiFetch(fileUrl(id), { method: "DELETE" });
   if (!res.ok && res.status !== 404) {
     const body = await res.json().catch(() => null) as { error?: unknown } | null;
     const detail = typeof body?.error === "string" && body.error.trim() ? `: ${body.error.trim()}` : "";
