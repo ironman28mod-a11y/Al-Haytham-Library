@@ -1,0 +1,9 @@
+# never upload local secrets
+.env*.local
+.env
+.env.*
+
+# local-only files
+.freebuff/
+.dev-server.log
+.local-d1.sqlite

@@ -29,6 +29,7 @@ next-env.d.ts
 # freebuff
 .freebuff/
 .dev-server.log
+.dev-server.pid
 
 # local dev
 .local-d1.sqlite
