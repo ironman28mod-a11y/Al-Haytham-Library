@@ -207,7 +207,7 @@ export async function uploadDriveChunk(
   });
   if (res.status === 308) {
     const range = res.headers.get("range");
-    const lastByte = range?.match(/-(\\d+)$/)?.[1];
+    const lastByte = range?.match(/-(\d+)$/)?.[1];
     return { complete: false, nextOffset: lastByte ? Number(lastByte) + 1 : undefined };
   }
   if (res.status === 200 || res.status === 201) return { complete: true };

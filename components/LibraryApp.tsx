@@ -2594,16 +2594,55 @@ export default function LibraryApp({ adminMemberCode }: { adminMemberCode?: stri
   };
 
   const addEbook = async (ebook: EBook, file: File, onProgress?: (percent: number) => void) => {
-    await storeLibraryFile(ebook.fileId!, file, true, false, onProgress);
-    try {
-      await api.createEbook(ebook);
-    } catch (err) {
-      await api.deleteFile(ebook.fileId!).catch(() => undefined);
-      await deleteBrowserFile(ebook.fileId!).catch(() => undefined);
-      throw err;
+    const isConflictError = (err: unknown) => err instanceof Error && err.message.includes("(409)");
+    const codeNumber = (code: string) => Number(String(code).replace(/\D/g, "")) || 0;
+    const codeFor = (num: number) => `EB-${String(num).padStart(5, "0")}`;
+    const freshCodes = async (): Promise<string[]> => {
+      try {
+        return (await api.fetchEbooks()).map((item) => item.code);
+      } catch {
+        return ebooksList.map((item) => item.code);
+      }
+    };
+    const nextFreeDraft = async (base: EBook): Promise<EBook> => {
+      const existing = await freshCodes();
+      const max = Math.max(codeNumber(base.code), ...existing.map(codeNumber), ...ebooksList.map((item) => codeNumber(item.code)));
+      const next = codeFor(max + 1);
+      return { ...base, code: next, fileId: `ebook:${next}` };
+    };
+    let draft = ebook;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        await storeLibraryFile(draft.fileId!, file, true, false, onProgress);
+      } catch (uploadErr) {
+        if (!isConflictError(uploadErr) || attempt === 4) throw uploadErr;
+        const existing = await freshCodes();
+        if (existing.includes(draft.code)) {
+          draft = await nextFreeDraft(draft);
+          continue;
+        }
+        // File yatim di Drive tanpa metadata: reclaim dengan timpa aman.
+        try {
+          await storeLibraryFile(draft.fileId!, file, true, true, onProgress);
+        } catch (reclaimErr) {
+          if (!isConflictError(reclaimErr)) throw reclaimErr;
+          draft = await nextFreeDraft(draft);
+          continue;
+        }
+      }
+      try {
+        await api.createEbook(draft);
+      } catch (createErr) {
+        await api.deleteFile(draft.fileId!).catch(() => undefined);
+        await deleteBrowserFile(draft.fileId!).catch(() => undefined);
+        if (!isConflictError(createErr) || attempt === 4) throw createErr;
+        draft = await nextFreeDraft(draft);
+        continue;
+      }
+      setEbooksList((current) => (current.some((item) => item.code === draft.code) ? current : [...current, draft]));
+      setEbookModalOpen(false);
+      return;
     }
-    setEbooksList((current) => [...current, ebook]);
-    setEbookModalOpen(false);
   };
 
   const updateEbook = async (nextEbook: EBook, file?: File, onProgress?: (percent: number) => void) => {
