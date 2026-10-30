@@ -45,6 +45,12 @@ function getInitials(name: string) {
   return name.trim().split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase() || "AU";
 }
 
+/** Kode buku berikutnya: BK- + nomor terbesar pada daftar + 1 (rapat 5 digit). */
+function nextBookCodeFrom(list: Pick<Book, "code">[]) {
+  const max = list.reduce((current, book) => Math.max(current, Number(book.code.replace(/\D/g, "")) || 0), 0);
+  return `BK-${String(max + 1).padStart(5, "0")}`;
+}
+
 type Book = {
   title: string;
   author: string;
@@ -1097,9 +1103,54 @@ async function isIllustrationPage(doc: pdfjsLib.PDFDocumentProxy, pageNumber: nu
   return false;
 }
 
-function FlipbookReader({ ebook, onClose }: { ebook: EBook; onClose: () => void }) {
+export type ReadingMode = "flipbook" | "scroll";
+
+/** Field minimum yang dipakai pembaca — sengaja lepas dari tipe EBook agar portal anggota bisa memakainya. */
+export type ReadableEBook = { title: string; author: string; format: string; code: string; fileId?: string };
+
+type JumpRequest = { page: number; nonce: number };
+
+const READING_MODE_STORAGE_KEY = "al-haytham-library:reading-mode:v1";
+
+/**
+ * Mode baca terakhir di perangkat ini. `null` berarti belum pernah memilih
+ * (per pemilik perangkat baru), sehingga klik "Baca" masih menampilkan pemilih mode.
+ */
+export function getSavedReadingMode(): ReadingMode | null {
+  try {
+    const raw = window.localStorage.getItem(READING_MODE_STORAGE_KEY);
+    return raw === "flipbook" || raw === "scroll" ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+export function rememberReadingMode(mode: ReadingMode) {
+  try {
+    window.localStorage.setItem(READING_MODE_STORAGE_KEY, mode);
+  } catch {
+    // Penyimpanan diblokir (mis. mode privat): pilihan hanya berlaku selama sesi ini.
+  }
+}
+
+/** Pilihan mode yang muncul ketika pengguna menekan tombol "Baca". */
+export function ReadingModeDialog({ ebook, onPick, onClose }: { ebook: ReadableEBook; onPick: (mode: ReadingMode) => void; onClose: () => void }) {
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [onClose]);
+
+  return <div className="modal-backdrop" role="presentation" onClick={onClose}><div className="modal reading-mode-modal" role="dialog" aria-modal="true" aria-labelledby="reading-mode-title" onClick={(event) => event.stopPropagation()}><div className="modal-header"><div><span className="eyebrow">MODE MEMBACA</span><h2 id="reading-mode-title">{ebook.title}</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Tutup"><Icon name="close" size={20} /></button></div><p className="reading-mode-hint">Pilihan Anda akan diingat di perangkat ini, jadi berikutnya klik Baca langsung membuka mode itu. Mode tetap bisa diganti kapan saja lewat toolbar pembaca.</p><div className="reading-mode-options"><button type="button" className="reading-mode-card" onClick={() => onPick("flipbook")}><span className="reading-mode-art art-flipbook" aria-hidden="true"><i /><i /></span><strong>Flipbook</strong><span className="reading-mode-desc">Dua halaman berdampingan dengan animasi membalik, seperti buku fisik.</span></button><button type="button" className="reading-mode-card" onClick={() => onPick("scroll")}><span className="reading-mode-art art-scroll" aria-hidden="true"><i /><i /><i /></span><strong>Scroll</strong><span className="reading-mode-desc">Halaman bertumpuk ke bawah — ringan dan selalu terasa seperti membaca PDF.</span></button></div></div></div>;
+}
+
+export function EbookReader({ ebook, mode, onModeChange, onClose }: { ebook: ReadableEBook; mode: ReadingMode; onModeChange: (mode: ReadingMode) => void; onClose: () => void }) {
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [errorMessage, setErrorMessage] = useState("");
+  const [scrollPage, setScrollPage] = useState(0);
+  const [jump, setJump] = useState<JumpRequest | null>(null);
   const [doc, setDoc] = useState<pdfjsLib.PDFDocumentProxy | null>(null);
   const [spreadIndex, setSpreadIndex] = useState(0);
   const [totalPages, setTotalPages] = useState(0);
@@ -1200,7 +1251,7 @@ function FlipbookReader({ ebook, onClose }: { ebook: EBook; onClose: () => void 
   useEffect(() => () => { if (loadingTaskRef.current) loadingTaskRef.current.destroy(); window.clearTimeout(flipTimeoutRef.current); }, []);
 
   useEffect(() => {
-    if (status !== "ready" || !doc || imagePages !== null) return;
+    if (status !== "ready" || mode !== "flipbook" || !doc || imagePages !== null) return;
     const pdfjs = pdfjsRef.current;
     if (!pdfjs) return;
     let cancelled = false;
@@ -1218,10 +1269,10 @@ function FlipbookReader({ ebook, onClose }: { ebook: EBook; onClose: () => void 
       }
     })();
     return () => { cancelled = true; };
-  }, [status, doc, imagePages]);
+  }, [status, mode, doc, imagePages]);
 
   useEffect(() => {
-    if (status !== "ready" || !doc) return;
+    if (status !== "ready" || mode !== "flipbook" || !doc) return;
     const token = ++renderTokenRef.current;
     if (singlePage !== null) {
       clearCanvas(leftRef.current);
@@ -1248,6 +1299,20 @@ function FlipbookReader({ ebook, onClose }: { ebook: EBook; onClose: () => void 
     if (status !== "ready") return;
     saveReadingProgress(ebook.code, singlePage ?? leftPage);
   }, [leftPage, singlePage, status, ebook.code]);
+
+  // Mode scroll: progres ikut halaman teratas yang sedang terlihat.
+  useEffect(() => {
+    if (status !== "ready" || mode !== "scroll" || scrollPage < 1) return;
+    saveReadingProgress(ebook.code, scrollPage);
+  }, [scrollPage, mode, status, ebook.code]);
+
+  // Balik ke flipbook: samakan spread dengan posisi terakhir di mode scroll
+  // supaya pembaca tidak melompat kembali ke halaman yang lebih awal.
+  useEffect(() => {
+    if (mode !== "flipbook" || scrollPage < 1 || totalPages === 0) return;
+    const targetSpread = Math.min(Math.floor((scrollPage - 1) / 2), Math.max(0, Math.ceil(totalPages / 2) - 1));
+    setSpreadIndex((current) => (current === targetSpread ? current : targetSpread));
+  }, [mode, scrollPage, totalPages]);
 
   useEffect(() => {
     if (!resumeNotice) return;
@@ -1303,14 +1368,20 @@ function FlipbookReader({ ebook, onClose }: { ebook: EBook; onClose: () => void 
 
   const jumpToPage = useCallback((targetIndex: number) => {
     if (turning || status !== "ready" || !doc) return;
-    const targetSpread = Math.floor(targetIndex / 2);
-    if (targetSpread === spreadIndex) {
-      setTocOpen(false);
-      return;
+    const targetPage = Math.min(Math.max(targetIndex + 1, 1), Math.max(totalPages, 1));
+    if (mode === "scroll") {
+      // Mode scroll: beri tahu ScrollStage agar ia yang menggeser ke halaman tujuan.
+      setJump({ page: targetPage, nonce: Date.now() });
+    } else {
+      const targetSpread = Math.floor(targetIndex / 2);
+      if (targetSpread === spreadIndex) {
+        setTocOpen(false);
+        return;
+      }
+      setSpreadIndex(targetSpread);
     }
-    setSpreadIndex(targetSpread);
     setTocOpen(false);
-  }, [turning, status, doc, spreadIndex]);
+  }, [turning, status, doc, spreadIndex, mode, totalPages]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -1320,29 +1391,226 @@ function FlipbookReader({ ebook, onClose }: { ebook: EBook; onClose: () => void 
           return;
         }
         onClose();
-      } else if (event.key === "ArrowRight" || event.key === "PageDown" || event.key === " ") {
+      } else if (mode === "flipbook" && (event.key === "ArrowRight" || event.key === "PageDown" || event.key === " ")) {
+        // Mode scroll memakai scroll native container, jadi hanya flipbook yang menangkap panah.
         event.preventDefault();
         goTo(1);
-      } else if (event.key === "ArrowLeft" || event.key === "PageUp") {
+      } else if (mode === "flipbook" && (event.key === "ArrowLeft" || event.key === "PageUp")) {
         event.preventDefault();
         goTo(-1);
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [goTo, onClose, tocOpen]);
+  }, [goTo, onClose, tocOpen, mode]);
 
-  const pageLabel = singlePage !== null ? `Halaman ${singlePage} / ${totalPages}` : rightPage <= totalPages ? `Halaman ${leftPage}–${rightPage} / ${totalPages}` : `Halaman ${leftPage} / ${totalPages}`;
+  const spreadLabel = singlePage !== null ? `Halaman ${singlePage} / ${totalPages}` : rightPage <= totalPages ? `Halaman ${leftPage}–${rightPage} / ${totalPages}` : `Halaman ${leftPage} / ${totalPages}`;
+  const pageLabel = mode === "scroll" ? `Halaman ${scrollPage > 0 ? scrollPage : singlePage ?? leftPage} / ${totalPages}` : spreadLabel;
 
   return <div className="flipbook-overlay" role="dialog" aria-modal="true" aria-label={`Baca ${ebook.title}`}>
     <div className="flipbook-toolbar">
       <button type="button" className="icon-button" onClick={onClose} aria-label="Tutup pembaca"><Icon name="close" size={20} /></button>
-      <div className="flipbook-title"><strong>{ebook.title}</strong><span>{ebook.author} · {ebook.format} · Flipbook</span></div>
+      <div className="flipbook-title"><strong>{ebook.title}</strong><span>{ebook.author} · {ebook.format} · {mode === "scroll" ? "Scroll" : "Flipbook"}</span></div>
+      <div className="flipbook-mode" role="group" aria-label="Mode membaca"><button type="button" className={mode === "flipbook" ? "active" : ""} aria-pressed={mode === "flipbook"} onClick={() => onModeChange("flipbook")}>Flipbook</button><button type="button" className={mode === "scroll" ? "active" : ""} aria-pressed={mode === "scroll"} onClick={() => onModeChange("scroll")}>Scroll</button></div>
       <div className="flipbook-tools">{outlineReady && outline && outline.length > 0 && <button type="button" className={`icon-button toc-button ${tocOpen ? "active" : ""}`} onClick={() => setTocOpen(!tocOpen)} aria-label="Daftar isi" aria-expanded={tocOpen}><Icon name="menu" size={18} /></button>}<span className="flipbook-page-info">{pageLabel}</span><span className="flipbook-zoom"><button type="button" className="zoom-button" onClick={() => setZoom((value) => Math.max(0.6, Number((value * 0.85).toFixed(2))))} aria-label="Perkecil">−</button><span>{Math.round(zoom * 100)}%</span><button type="button" className="zoom-button" onClick={() => setZoom((value) => Math.min(2.5, Number((value * 1.15).toFixed(2))))} aria-label="Perbesar">+</button></span></div>
     </div>
     {status === "loading" && <div className="flipbook-stage"><div className="flipbook-message"><span className="flipbook-spinner" /><strong>Membuka {ebook.title}…</strong><span>Menyiapkan halaman PDF</span></div></div>}
     {status === "error" && <div className="flipbook-stage"><div className="flipbook-message error"><Icon name="alert" size={28} /><strong>Gagal membuka file</strong><span>{errorMessage}</span><button type="button" className="button button-primary" onClick={onClose}>Tutup</button></div></div>}
-    {status === "ready" && <>{resumeNotice && <div className="flipbook-resume-notice" role="status">{resumeNotice}</div>}<div className="flipbook-stage"><div className="flipbook-book" ref={bookRef}><div className="flipbook-spread">{singlePage !== null ? <div className="flipbook-single"><canvas ref={singleRef} /></div> : <><div className="flipbook-sheet left"><canvas ref={leftRef} /></div><div className="flipbook-sheet right"><canvas ref={rightRef} /></div></>}<div className={`flipbook-leaf ${flipDir === 1 ? "next" : "prev"} ${turning ? "" : "hidden"}`} ref={leafRef} style={{ transform: `rotateY(${angle}deg)` }}><div className="flipbook-face front"><canvas ref={flipFrontRef} /></div><div className="flipbook-face back"><canvas ref={flipBackRef} /></div></div></div></div><div className="flipbook-footer"><button type="button" className="button button-outline" onClick={() => goTo(-1)} disabled={turning || spreadIndex === 0}><Icon name="arrowUp" size={15} style={{ transform: "rotate(-90deg)" }} /> Sebelumnya</button><span className="flipbook-hint">Gunakan panah ← → atau spasi untuk membalik halaman</span><button type="button" className="button button-outline" onClick={() => goTo(1)} disabled={turning || spreadIndex >= totalSpreads - 1}>Berikutnya <Icon name="arrowUp" size={15} style={{ transform: "rotate(90deg)" }} /></button></div></div>{tocOpen && <div className="flipbook-toc-backdrop" onClick={() => setTocOpen(false)} />}{tocOpen && <aside className="flipbook-toc" role="complementary" aria-label="Daftar isi"><div className="flipbook-toc-header"><strong>Daftar isi</strong><button type="button" className="icon-button" onClick={() => setTocOpen(false)} aria-label="Tutup daftar isi"><Icon name="close" size={17} /></button></div><div className="flipbook-toc-body">{outline && outline.length > 0 ? <OutlineList entries={outline} depth={0} onJump={jumpToPage} /> : <div className="flipbook-toc-empty">Dokumen ini tidak memiliki daftar isi.</div>}</div></aside>}</>}
+    {status === "ready" && doc && <>{resumeNotice && <div className="flipbook-resume-notice" role="status">{resumeNotice}</div>}{mode === "scroll" ? <ScrollStage doc={doc} totalPages={totalPages} zoom={zoom} startPage={singlePage ?? leftPage} jump={jump} onPageChange={setScrollPage} /> : <><div className="flipbook-stage"><div className="flipbook-book" ref={bookRef}><div className="flipbook-spread">{singlePage !== null ? <div className="flipbook-single"><canvas ref={singleRef} /></div> : <><div className="flipbook-sheet left"><canvas ref={leftRef} /></div><div className="flipbook-sheet right"><canvas ref={rightRef} /></div></>}<div className={`flipbook-leaf ${flipDir === 1 ? "next" : "prev"} ${turning ? "" : "hidden"}`} ref={leafRef} style={{ transform: `rotateY(${angle}deg)` }}><div className="flipbook-face front"><canvas ref={flipFrontRef} /></div><div className="flipbook-face back"><canvas ref={flipBackRef} /></div></div></div></div><div className="flipbook-footer"><button type="button" className="button button-outline" onClick={() => goTo(-1)} disabled={turning || spreadIndex === 0}><Icon name="arrowUp" size={15} style={{ transform: "rotate(-90deg)" }} /> Sebelumnya</button><span className="flipbook-hint">Gunakan panah ← → atau spasi untuk membalik halaman</span><button type="button" className="button button-outline" onClick={() => goTo(1)} disabled={turning || spreadIndex >= totalSpreads - 1}>Berikutnya <Icon name="arrowUp" size={15} style={{ transform: "rotate(90deg)" }} /></button></div></div></>}{tocOpen && <div className="flipbook-toc-backdrop" onClick={() => setTocOpen(false)} />}{tocOpen && <aside className="flipbook-toc" role="complementary" aria-label="Daftar isi"><div className="flipbook-toc-header"><strong>Daftar isi</strong><button type="button" className="icon-button" onClick={() => setTocOpen(false)} aria-label="Tutup daftar isi"><Icon name="close" size={17} /></button></div><div className="flipbook-toc-body">{outline && outline.length > 0 ? <OutlineList entries={outline} depth={0} onJump={jumpToPage} /> : <div className="flipbook-toc-empty">Dokumen ini tidak memiliki daftar isi.</div>}</div></aside>}</>}
+  </div>;
+}
+
+type ScrollStageProps = { doc: pdfjsLib.PDFDocumentProxy; totalPages: number; zoom: number; startPage: number; jump: JumpRequest | null; onPageChange: (page: number) => void };
+
+/**
+ * Mode scroll: seluruh halaman ditumpuk ke bawah, persis seperti membaca PDF.
+ * Hanya halaman di sekitar viewport yang dirender (IntersectionObserver), lalu
+ * dilepas kembali begitu jauh — memori tetap stabil untuk dokumen ratusan halaman.
+ */
+function ScrollStage({ doc, totalPages, zoom, startPage, jump, onPageChange }: ScrollStageProps) {
+  const startRef = useRef(startPage);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const nodeRefs = useRef(new Map<number, HTMLDivElement>());
+  const canvasRefs = useRef(new Map<number, HTMLCanvasElement>());
+  const wantedRef = useRef(new Set<number>());
+  const renderingRef = useRef(new Set<number>());
+  const taskRefs = useRef(new Map<number, { cancel: () => void }>());
+  const zoomRef = useRef(zoom);
+  const widthRef = useRef(0);
+  const currentPageRef = useRef(startPage);
+  const frameRef = useRef(0);
+  const positionedRef = useRef(false);
+  const [width, setWidth] = useState(0);
+  const [ratio, setRatio] = useState(1.414);
+  const pages = useMemo(() => Array.from({ length: totalPages }, (_, index) => index + 1), [totalPages]);
+
+  useEffect(() => { zoomRef.current = zoom; }, [zoom]);
+
+  // Lebar area baca (content box, tanpa padding) jadi acuan ukuran halaman.
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!element) return;
+    const observer = new ResizeObserver((entries) => {
+      const next = Math.round(entries[0]?.contentRect.width ?? 0);
+      if (next <= 0) return;
+      widthRef.current = next;
+      setWidth((previous) => (Math.abs(previous - next) > 1 ? next : previous));
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  // Rasio halaman pertama dipakai sebagai placeholder supaya tinggi dokumen tidak melompat.
+  useEffect(() => {
+    let cancelled = false;
+    doc.getPage(1).then((page) => {
+      const viewport = page.getViewport({ scale: 1 });
+      if (!cancelled && viewport.width > 0) setRatio(viewport.width / viewport.height);
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [doc]);
+
+  const releasePage = useCallback((pageNumber: number) => {
+    const task = taskRefs.current.get(pageNumber);
+    if (task) {
+      try { task.cancel(); } catch { /* sudah selesai */ }
+    }
+    const canvas = canvasRefs.current.get(pageNumber);
+    if (canvas) {
+      canvas.width = 1;
+      canvas.height = 1;
+      canvas.style.width = "";
+      canvas.style.height = "";
+    }
+  }, []);
+
+  const renderPage = useCallback(async (pageNumber: number) => {
+    const canvas = canvasRefs.current.get(pageNumber);
+    const available = widthRef.current;
+    if (!canvas || available <= 0 || renderingRef.current.has(pageNumber)) return;
+    renderingRef.current.add(pageNumber);
+    try {
+      const page = await doc.getPage(pageNumber);
+      const base = page.getViewport({ scale: 1 });
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const scale = ((available * zoomRef.current) / base.width) * dpr;
+      const viewport = page.getViewport({ scale });
+      canvas.width = Math.floor(viewport.width);
+      canvas.height = Math.floor(viewport.height);
+      canvas.style.width = `${Math.floor(viewport.width / dpr)}px`;
+      canvas.style.height = `${Math.floor(viewport.height / dpr)}px`;
+      const task = page.render({ canvas, viewport });
+      taskRefs.current.set(pageNumber, task);
+      await task.promise;
+    } catch {
+      // Render dibatalkan karena halaman sudah keluar dari jangkauan.
+    } finally {
+      renderingRef.current.delete(pageNumber);
+      taskRefs.current.delete(pageNumber);
+    }
+  }, [doc]);
+
+  // Render halaman di sekitar viewport, lepas yang sudah jauh agar hemat memori.
+  useEffect(() => {
+    const root = containerRef.current;
+    if (!root) return;
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        const pageNumber = Number((entry.target as HTMLElement).dataset.page);
+        if (!pageNumber) continue;
+        if (entry.isIntersecting) {
+          wantedRef.current.add(pageNumber);
+          void renderPage(pageNumber);
+        } else if (wantedRef.current.delete(pageNumber)) {
+          releasePage(pageNumber);
+        }
+      }
+    }, { root, rootMargin: "110% 0px", threshold: 0 });
+    nodeRefs.current.forEach((node) => observer.observe(node));
+    return () => observer.disconnect();
+  }, [doc, totalPages, renderPage, releasePage]);
+
+  // Render ulang halaman yang sedang diinginkan setelah lebar atau zoom berubah.
+  useEffect(() => {
+    if (!width) return;
+    const pending = Array.from(wantedRef.current).sort((a, b) => a - b);
+    pending.forEach((pageNumber, index) => {
+      window.setTimeout(() => {
+        // Bisa saja halaman sudah keluar viewport sebelum giliran ini — jangan dirender ulang.
+        if (!wantedRef.current.has(pageNumber)) return;
+        void renderPage(pageNumber);
+      }, index * 20);
+    });
+  }, [width, zoom, renderPage]);
+
+  // Posisi awal: langsung menuju halaman terakhir dibaca.
+  useEffect(() => {
+    if (!width || positionedRef.current) return;
+    const root = containerRef.current;
+    const node = nodeRefs.current.get(startRef.current);
+    if (!root || !node) return;
+    positionedRef.current = true;
+    root.scrollTop = Math.max(0, node.offsetTop - 16);
+    currentPageRef.current = startRef.current;
+    onPageChange(startRef.current);
+  }, [width, onPageChange]);
+
+  // Lompat dari daftar isi.
+  useEffect(() => {
+    if (!jump) return;
+    const root = containerRef.current;
+    const node = nodeRefs.current.get(jump.page);
+    if (!root || !node) return;
+    root.scrollTo({ top: Math.max(0, node.offsetTop - 16), behavior: "smooth" });
+    currentPageRef.current = jump.page;
+    onPageChange(jump.page);
+  }, [jump, onPageChange]);
+
+  const trackCurrentPage = useCallback(() => {
+    const root = containerRef.current;
+    if (!root) return;
+    const marker = root.scrollTop + Math.min(root.clientHeight * 0.4, 260);
+    let current = 1;
+    for (let pageNumber = 1; pageNumber <= totalPages; pageNumber++) {
+      const node = nodeRefs.current.get(pageNumber);
+      if (!node) continue;
+      if (node.offsetTop <= marker) current = pageNumber;
+      else break;
+    }
+    if (current !== currentPageRef.current) {
+      currentPageRef.current = current;
+      onPageChange(current);
+    }
+  }, [totalPages, onPageChange]);
+
+  const handleScroll = useCallback(() => {
+    if (frameRef.current) return;
+    frameRef.current = window.requestAnimationFrame(() => {
+      frameRef.current = 0;
+      trackCurrentPage();
+    });
+  }, [trackCurrentPage]);
+
+  useEffect(() => {
+    // Fokus ke container supaya panah atas/bawah dan PageUp/PageDown menggulir halaman.
+    containerRef.current?.focus({ preventScroll: true });
+    return () => {
+      if (frameRef.current) window.cancelAnimationFrame(frameRef.current);
+      taskRefs.current.forEach((task) => { try { task.cancel(); } catch { /* abaikan */ } });
+      taskRefs.current.clear();
+    };
+  }, []);
+
+  const pageWidth = width > 0 ? Math.max(1, Math.round(width * zoom)) : 0;
+  const pageHeight = pageWidth > 0 ? Math.round(pageWidth / ratio) : 0;
+
+  return <div className="scroll-reader" ref={containerRef} tabIndex={0} onScroll={handleScroll} aria-label="Halaman dokumen">
+    <div className="scroll-pages">
+      {pages.map((pageNumber) => <div key={pageNumber} className="scroll-page" data-page={pageNumber} ref={(node) => { if (node) nodeRefs.current.set(pageNumber, node); else nodeRefs.current.delete(pageNumber); }} style={pageWidth > 0 ? { width: pageWidth, height: pageHeight } : undefined}>
+        <canvas ref={(node) => { if (node) canvasRefs.current.set(pageNumber, node); else canvasRefs.current.delete(pageNumber); }} />
+        <span className="scroll-page-number">{pageNumber}</span>
+      </div>)}
+    </div>
   </div>;
 }
 
@@ -1485,8 +1753,8 @@ function AddBookModal({ nextCode, categories, onClose, onAdd }: { nextCode: stri
     setSaving(true);
     try {
       await onAdd({ title: title.trim(), author: author.trim(), category: category.trim(), code: nextCode, stock: 1, available: 1, color: colors[title.trim().length % colors.length], initials: getInitials(title), coverId: cover ? `book-cover:${nextCode}` : undefined, coverName: cover?.name }, cover ?? undefined);
-    } catch {
-      setError("Cover atau data buku tidak dapat disimpan. Silakan coba lagi.");
+    } catch (error) {
+      setError(error instanceof Error && error.message ? error.message : "Cover atau data buku tidak dapat disimpan. Silakan coba lagi.");
     } finally {
       setSaving(false);
     }
@@ -1524,8 +1792,8 @@ function EditBookModal({ book, categories, onClose, onSave }: { book: Book; cate
     setSaving(true);
     try {
       await onSave({ ...book, title: title.trim(), author: author.trim(), category: category.trim(), coverName: cover ? cover.name : book.coverName }, cover ?? undefined);
-    } catch {
-      setError("Perubahan tidak dapat disimpan. Silakan coba lagi.");
+    } catch (error) {
+      setError(error instanceof Error && error.message ? error.message : "Perubahan tidak dapat disimpan. Silakan coba lagi.");
     } finally {
       setSaving(false);
     }
@@ -2363,6 +2631,14 @@ export default function LibraryApp({ adminMemberCode }: { adminMemberCode?: stri
   const [ebookModalOpen, setEbookModalOpen] = useState(false);
   const [ebookToEdit, setEbookToEdit] = useState<EBook | null>(null);
   const [readingEbook, setReadingEbook] = useState<EBook | null>(null);
+  const [readingMode, setReadingMode] = useState<ReadingMode>("flipbook");
+  const [modeChooser, setModeChooser] = useState<EBook | null>(null);
+
+  // Ganti mode lewat toolbar: sekalian jadi preferensi perangkat untuk klik Baca berikutnya.
+  const changeReadingMode = useCallback((mode: ReadingMode) => {
+    setReadingMode(mode);
+    rememberReadingMode(mode);
+  }, []);
   const [bookModalOpen, setBookModalOpen] = useState(false);
   const [bookToEdit, setBookToEdit] = useState<Book | null>(null);
   const [memberModalOpen, setMemberModalOpen] = useState(false);
@@ -2669,15 +2945,66 @@ export default function LibraryApp({ adminMemberCode }: { adminMemberCode?: stri
   };
 
   const addBook = async (book: Book, cover?: File) => {
-    if (cover && book.coverId) await storeLibraryFile(book.coverId, cover);
-    await api.createBook(book).catch(() => undefined);
-    setBooksList((current) => [...current, book]);
+    // Kode diambil ulang dari server: daftar di layar bisa tertinggal bila ada tab
+    // atau petugas lain yang menambah buku, dan kode tabrakan membuat insert gagal.
+    const freshBooks = await api.fetchBooks().catch(() => null);
+    let candidate = book;
+    if (freshBooks) {
+      const freshCode = nextBookCodeFrom(freshBooks);
+      if (freshCode !== book.code) {
+        candidate = { ...book, code: freshCode, coverId: cover ? `book-cover:${freshCode}` : undefined };
+      }
+    }
+
+    const uploadedIds: string[] = [];
+    let saved: Book | null = null;
+    let failure: unknown = null;
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        if (cover && candidate.coverId) {
+          await storeLibraryFile(candidate.coverId, cover);
+          if (!uploadedIds.includes(candidate.coverId)) uploadedIds.push(candidate.coverId);
+        }
+        await api.createBook(candidate);
+        saved = candidate;
+        break;
+      } catch (error) {
+        failure = error;
+        const conflict = error instanceof api.ApiError && error.status === 409;
+        if (!conflict || attempt === 2) break;
+        const latest = await api.fetchBooks().catch(() => null);
+        if (!latest) break;
+        const nextCode = nextBookCodeFrom(latest);
+        if (nextCode === candidate.code) break;
+        candidate = { ...candidate, code: nextCode, coverId: cover ? `book-cover:${nextCode}` : undefined };
+      }
+    }
+
+    // Gagal tersimpan: buang file cover yang terlanjur diunggah, lalu teruskan
+    // errornya supaya modal tetap terbuka dengan pesan yang jelas (bukan buku hantu).
+    if (!saved) {
+      for (const id of uploadedIds) {
+        await api.deleteFile(id).catch(() => undefined);
+        await deleteBrowserFile(id).catch(() => undefined);
+      }
+      throw failure instanceof Error ? failure : new Error("Buku tidak dapat disimpan ke server.");
+    }
+
+    const toSave = saved;
+    // Buang file cover milik percobaan yang gagal sebelumnya.
+    for (const id of uploadedIds) {
+      if (id === toSave.coverId) continue;
+      await api.deleteFile(id).catch(() => undefined);
+      await deleteBrowserFile(id).catch(() => undefined);
+    }
+    setBooksList((current) => [...current, toSave]);
     setBookModalOpen(false);
   };
 
   const updateBook = async (nextBook: Book, cover?: File) => {
     if (cover && nextBook.coverId) await storeLibraryFile(nextBook.coverId, cover);
-    await api.updateBook(nextBook).catch(() => undefined);
+    await api.updateBook(nextBook);
     setBooksList((current) => current.map((book) => book.code === nextBook.code ? nextBook : book));
     setBookToEdit(null);
   };
@@ -2918,7 +3245,7 @@ export default function LibraryApp({ adminMemberCode }: { adminMemberCode?: stri
   const navigate = (page: PageKey) => { setActivePage(page); setSidebarOpen(false); setNotificationsOpen(false); };
   const requestConfirmation = (request: ConfirmRequest) => setConfirmRequest(request);
   const nextEbookCode = `EB-${String(ebooksList.reduce((max, ebook) => Math.max(max, Number(ebook.code.replace(/\D/g, "")) || 0), 0) + 1).padStart(5, "0")}`;
-  const nextBookCode = `BK-${String(booksList.reduce((max, book) => Math.max(max, Number(book.code.replace(/\D/g, "")) || 0), 0) + 1).padStart(5, "0")}`;
+  const nextBookCode = nextBookCodeFrom(booksList);
   const nextMemberCodes: Record<MemberRole, string> = { Admin: memberCodeForRole("Admin", membersList), Guru: memberCodeForRole("Guru", membersList), Siswa: memberCodeForRole("Siswa", membersList) };
   const activeLoanCount = loansList.filter((loan) => getLoanStatus(loan) !== "Dikembalikan").length;
   const overdueLoanCount = loansList.filter((loan) => getLoanStatus(loan) === "Terlambat").length;
@@ -2927,5 +3254,11 @@ export default function LibraryApp({ adminMemberCode }: { adminMemberCode?: stri
 
   return <div className={`app-shell avatar-shape-${avatarShape} ${isDark ? "dark-mode" : ""}`}>
     <aside className={`sidebar ${sidebarOpen ? "sidebar-open" : ""}`}><div className="brand"><img src="/logo.png" alt="Al-Haytham Library" className="brand-logo" width="36" height="36" /><span>Al-Haytham <span className="brand-accent">Library</span></span></div><div className="sidebar-label">MENU UTAMA</div><nav>{navItems.map((item) => <button key={item.key} className={`nav-item ${activePage === item.key ? "active" : ""}`} onClick={() => navigate(item.key)}><Icon name={item.icon} size={19} /><span>{item.label}</span>{item.key === "loans" && <em>{activeLoanCount}</em>}</button>)}</nav><div className="sidebar-label sidebar-secondary">LAINNYA</div><nav><button className={`nav-item ${activePage === "settings" ? "active" : ""}`} onClick={() => navigate("settings")}><Icon name="sliders" size={19} /><span>Pengaturan</span></button></nav><div className="sidebar-bottom"><div className="help-card"><div className="help-spark">✦</div><strong>Butuh bantuan?</strong><span>Pelajari cara menggunakan Al-Haytham Library.</span><button type="button" onClick={() => setGuideOpen(true)}>Mulai panduan <span>→</span></button></div>        <button className="user-card" onClick={() => setProfileOpen(true)} aria-label="Edit profil"><span className="avatar user-avatar">{profile.avatarData ? <img key={profile.avatarData} src={profile.avatarData} alt={`Foto ${profile.name}`} /> : getInitials(profile.name)}</span><span><b>{profile.name}</b><small>{profile.role === "student" ? "Siswa" : profile.detail}</small></span><Icon name="more" size={18} /></button></div></aside>
-    <main className="main-content">{swUpdateReady && <div className="form-success storage-warning" style={{cursor:'pointer',display:'flex',alignItems:'center',gap:8,justifyContent:'space-between'}} onClick={applySwUpdate}><span>🔄 Versi baru tersedia. Klik untuk memperbarui.</span><button className="button button-primary" style={{flexShrink:0,padding:'6px 14px',fontSize:12}} onClick={applySwUpdate}>Muat Ulang</button></div>}<header className="topbar"><button className="mobile-menu icon-button" onClick={() => setSidebarOpen(!sidebarOpen)} aria-label="Buka menu"><Icon name="menu" size={21} /></button><div className="breadcrumb"><span>Perpustakaan</span><b>/</b><strong>{pageTitle}</strong></div><div className="topbar-actions"><label className="top-search"><Icon name="search" size={17} /><input placeholder="Cari apa saja..." /></label><div className="notification-wrap"><button className="notification-button" aria-label="Notifikasi" aria-expanded={notificationsOpen} onClick={() => setNotificationsOpen(!notificationsOpen)}><Icon name="bell" size={20} /><span /></button>{notificationsOpen && <NotificationPanel onNavigate={navigate} onClose={() => setNotificationsOpen(false)} overdueCount={overdueLoanCount} lowStockCount={lowStockCount} readyReservations={reservationsList.filter((r) => r.status === "Tersedia")} />}</div><button className="top-avatar" onClick={() => setProfileOpen(true)} aria-label="Edit profil">{profile.avatarData ? <img key={profile.avatarData} src={profile.avatarData} alt={`Foto ${profile.name}`} /> : getInitials(profile.name)}</button></div></header><div key={activePage} className="page-content">{activePage === "overview" && <Overview booksList={booksList} ebooksList={ebooksList} membersList={membersList} loansList={loansList} onNavigate={navigate} onQuickLoan={() => setModalOpen(true)} adminName={profile.name} />}{activePage === "ebooks" && <EBooksPage ebooks={ebooksList} categories={categories} onAdd={() => setEbookModalOpen(true)} isAdmin={profile.role === "staff"} onRead={(ebook) => setReadingEbook(ebook)} onEdit={(ebook) => setEbookToEdit(ebook)} onDelete={(ebook) => requestConfirmation({ title: "Hapus E-Book", message: `Hapus E-Book “${ebook.title}”? File yang tersimpan juga akan dihapus.`, confirmLabel: "Hapus E-Book", danger: true, onConfirm: () => deleteEbook(ebook) })} />}{activePage === "books" && <BooksPage booksList={booksList} categories={categories} onAdd={() => setBookModalOpen(true)} isAdmin={profile.role === "staff"} onEdit={(book) => setBookToEdit(book)} onDelete={(book) => requestConfirmation({ title: "Hapus buku", message: `Hapus buku “${book.title}”? Cover yang tersimpan juga akan dihapus.`, confirmLabel: "Hapus buku", danger: true, onConfirm: () => deleteBook(book) })} onReserve={(bookCode) => addReservation({ memberCode: profile.role === "staff" ? membersList[0]?.code : profile.detail, bookCode })} reservationsList={reservationsList} />}{activePage === "members" && <MembersPage membersList={membersList} classes={classes} onAdd={() => setMemberModalOpen(true)} onEdit={setMemberToEdit} onDelete={(member) => requestConfirmation({ title: "Hapus anggota", message: `Hapus anggota “${member.name}”? Riwayat transaksi yang sudah selesai tetap dipertahankan.`, confirmLabel: "Hapus anggota", danger: true, onConfirm: () => deleteMember(member) })} onAddClass={() => setClassModalOpen(true)} onImportStudents={() => setStudentImportOpen(true)} onDownloadTemplate={() => downloadStudentTemplate(classes)} onResetPassword={(member, newPassword) => updateMember({ ...member, password: newPassword })} />}{activePage === "loans" && <LoansPage loansList={loansList} membersList={membersList} onQuickLoan={() => setModalOpen(true)} onReturnLoan={returnLoan} />}{activePage === "reports" && <ReportsPage booksList={booksList} membersList={membersList} loansList={loansList} />}{activePage === "reservations" && <ReservationsPage reservationsList={reservationsList} booksList={booksList} membersList={membersList} onCancel={cancelReservation} onFulfill={fulfillReservation} />}{activePage === "settings" && <SettingsPage categories={categories} avatarShape={avatarShape} onAvatarShapeChange={setAvatarShape} themeMode={themeMode} onThemeModeChange={setThemeMode} onAddCategory={addCategory} onDeleteCategory={deleteCategory} libraryName={libraryName} adminEmail={adminEmail} loanDuration={loanDuration} dueDateReminder={dueDateReminder} lowStockReminder={lowStockReminder} timezone={timezone} onSaveSettings={saveSettings} />}</div></main>{modalOpen && <QuickLoanModal membersList={membersList} booksList={booksList} onClose={() => setModalOpen(false)} onAddLoan={addLoan} />}{ebookModalOpen && <AddEbookModal nextCode={nextEbookCode} categories={categories} onClose={() => setEbookModalOpen(false)} onAdd={addEbook} />}{ebookToEdit && <EditEbookModal ebook={ebookToEdit} categories={categories} onClose={() => setEbookToEdit(null)} onSave={updateEbook} />}{readingEbook && <FlipbookReader ebook={readingEbook} onClose={() => setReadingEbook(null)} />}{bookModalOpen && <AddBookModal nextCode={nextBookCode} categories={categories} onClose={() => setBookModalOpen(false)} onAdd={addBook} />}{bookToEdit && <EditBookModal book={bookToEdit} categories={categories} onClose={() => setBookToEdit(null)} onSave={updateBook} />}{memberModalOpen && <AddMemberModal nextCodes={nextMemberCodes} existingMembers={membersList} classes={classes} onClose={() => setMemberModalOpen(false)} onAdd={addMember} />}{memberToEdit && <EditMemberModal member={memberToEdit} existingMembers={membersList} classes={classes} onClose={() => setMemberToEdit(null)} onSave={updateMember} />}{classModalOpen && <AddClassModal classes={classes} onClose={() => setClassModalOpen(false)} onAdd={addClass} onDelete={deleteClass} onConfirm={requestConfirmation} />}{studentImportOpen && <ImportStudentsModal classes={classes} onClose={() => setStudentImportOpen(false)} onImport={importStudents} />}{guideOpen && <GuideModal onClose={() => setGuideOpen(false)} onNavigate={navigate} />}{profileOpen && <ProfileModal profile={profile} onClose={() => setProfileOpen(false)} onSave={saveProfile} onLogout={() => requestConfirmation({ title: "Keluar dari aplikasi", message: "Apakah Anda yakin ingin keluar?", confirmLabel: "Keluar", danger: true, onConfirm: () => { void api.logout().catch(() => undefined); localStorage.clear(); router.push("/login"); } })} />}{confirmRequest && <ConfirmDialog request={confirmRequest} onClose={() => setConfirmRequest(null)} />}<div className="toast-container" aria-live="polite" aria-label="Notifikasi">{toasts.map((t) => <div key={t.id} className={`toast toast-${t.type}`} onClick={() => removeToast(t.id)}><span className="toast-icon">{t.type === "error" ? "❌" : t.type === "success" ? "✅" : "ℹ️"}</span><span className="toast-message">{t.message}</span><button className="toast-close" onClick={() => removeToast(t.id)} aria-label="Tutup">×</button></div>)}</div></div>;
+    <main className="main-content">{swUpdateReady && <div className="form-success storage-warning" style={{cursor:'pointer',display:'flex',alignItems:'center',gap:8,justifyContent:'space-between'}} onClick={applySwUpdate}><span>🔄 Versi baru tersedia. Klik untuk memperbarui.</span><button className="button button-primary" style={{flexShrink:0,padding:'6px 14px',fontSize:12}} onClick={applySwUpdate}>Muat Ulang</button></div>}<header className="topbar"><button className="mobile-menu icon-button" onClick={() => setSidebarOpen(!sidebarOpen)} aria-label="Buka menu"><Icon name="menu" size={21} /></button><div className="breadcrumb"><span>Perpustakaan</span><b>/</b><strong>{pageTitle}</strong></div><div className="topbar-actions"><label className="top-search"><Icon name="search" size={17} /><input placeholder="Cari apa saja..." /></label><div className="notification-wrap"><button className="notification-button" aria-label="Notifikasi" aria-expanded={notificationsOpen} onClick={() => setNotificationsOpen(!notificationsOpen)}><Icon name="bell" size={20} /><span /></button>{notificationsOpen && <NotificationPanel onNavigate={navigate} onClose={() => setNotificationsOpen(false)} overdueCount={overdueLoanCount} lowStockCount={lowStockCount} readyReservations={reservationsList.filter((r) => r.status === "Tersedia")} />}</div><button className="top-avatar" onClick={() => setProfileOpen(true)} aria-label="Edit profil">{profile.avatarData ? <img key={profile.avatarData} src={profile.avatarData} alt={`Foto ${profile.name}`} /> : getInitials(profile.name)}</button></div></header><div key={activePage} className="page-content">{activePage === "overview" && <Overview booksList={booksList} ebooksList={ebooksList} membersList={membersList} loansList={loansList} onNavigate={navigate} onQuickLoan={() => setModalOpen(true)} adminName={profile.name} />}{activePage === "ebooks" && <EBooksPage ebooks={ebooksList} categories={categories} onAdd={() => setEbookModalOpen(true)} isAdmin={profile.role === "staff"} onRead={(ebook) => {
+  if (ebook.format !== "PDF") { setReadingEbook(ebook); return; }
+  const saved = getSavedReadingMode();
+  // Sudah pernah memilih → langsung buka; belum pernah → tawarkan pemilih mode.
+  if (saved) { setReadingMode(saved); setReadingEbook(ebook); return; }
+  setModeChooser(ebook);
+}} onEdit={(ebook) => setEbookToEdit(ebook)} onDelete={(ebook) => requestConfirmation({ title: "Hapus E-Book", message: `Hapus E-Book “${ebook.title}”? File yang tersimpan juga akan dihapus.`, confirmLabel: "Hapus E-Book", danger: true, onConfirm: () => deleteEbook(ebook) })} />}{activePage === "books" && <BooksPage booksList={booksList} categories={categories} onAdd={() => setBookModalOpen(true)} isAdmin={profile.role === "staff"} onEdit={(book) => setBookToEdit(book)} onDelete={(book) => requestConfirmation({ title: "Hapus buku", message: `Hapus buku “${book.title}”? Cover yang tersimpan juga akan dihapus.`, confirmLabel: "Hapus buku", danger: true, onConfirm: () => deleteBook(book) })} onReserve={(bookCode) => addReservation({ memberCode: profile.role === "staff" ? membersList[0]?.code : profile.detail, bookCode })} reservationsList={reservationsList} />}{activePage === "members" && <MembersPage membersList={membersList} classes={classes} onAdd={() => setMemberModalOpen(true)} onEdit={setMemberToEdit} onDelete={(member) => requestConfirmation({ title: "Hapus anggota", message: `Hapus anggota “${member.name}”? Riwayat transaksi yang sudah selesai tetap dipertahankan.`, confirmLabel: "Hapus anggota", danger: true, onConfirm: () => deleteMember(member) })} onAddClass={() => setClassModalOpen(true)} onImportStudents={() => setStudentImportOpen(true)} onDownloadTemplate={() => downloadStudentTemplate(classes)} onResetPassword={(member, newPassword) => updateMember({ ...member, password: newPassword })} />}{activePage === "loans" && <LoansPage loansList={loansList} membersList={membersList} onQuickLoan={() => setModalOpen(true)} onReturnLoan={returnLoan} />}{activePage === "reports" && <ReportsPage booksList={booksList} membersList={membersList} loansList={loansList} />}{activePage === "reservations" && <ReservationsPage reservationsList={reservationsList} booksList={booksList} membersList={membersList} onCancel={cancelReservation} onFulfill={fulfillReservation} />}{activePage === "settings" && <SettingsPage categories={categories} avatarShape={avatarShape} onAvatarShapeChange={setAvatarShape} themeMode={themeMode} onThemeModeChange={setThemeMode} onAddCategory={addCategory} onDeleteCategory={deleteCategory} libraryName={libraryName} adminEmail={adminEmail} loanDuration={loanDuration} dueDateReminder={dueDateReminder} lowStockReminder={lowStockReminder} timezone={timezone} onSaveSettings={saveSettings} />}</div></main>{modalOpen && <QuickLoanModal membersList={membersList} booksList={booksList} onClose={() => setModalOpen(false)} onAddLoan={addLoan} />}{ebookModalOpen && <AddEbookModal nextCode={nextEbookCode} categories={categories} onClose={() => setEbookModalOpen(false)} onAdd={addEbook} />}{ebookToEdit && <EditEbookModal ebook={ebookToEdit} categories={categories} onClose={() => setEbookToEdit(null)} onSave={updateEbook} />}{modeChooser && <ReadingModeDialog ebook={modeChooser} onClose={() => setModeChooser(null)} onPick={(mode) => { changeReadingMode(mode); setReadingEbook(modeChooser); setModeChooser(null); }} />}{readingEbook && <EbookReader ebook={readingEbook} mode={readingMode} onModeChange={changeReadingMode} onClose={() => setReadingEbook(null)} />}{bookModalOpen && <AddBookModal nextCode={nextBookCode} categories={categories} onClose={() => setBookModalOpen(false)} onAdd={addBook} />}{bookToEdit && <EditBookModal book={bookToEdit} categories={categories} onClose={() => setBookToEdit(null)} onSave={updateBook} />}{memberModalOpen && <AddMemberModal nextCodes={nextMemberCodes} existingMembers={membersList} classes={classes} onClose={() => setMemberModalOpen(false)} onAdd={addMember} />}{memberToEdit && <EditMemberModal member={memberToEdit} existingMembers={membersList} classes={classes} onClose={() => setMemberToEdit(null)} onSave={updateMember} />}{classModalOpen && <AddClassModal classes={classes} onClose={() => setClassModalOpen(false)} onAdd={addClass} onDelete={deleteClass} onConfirm={requestConfirmation} />}{studentImportOpen && <ImportStudentsModal classes={classes} onClose={() => setStudentImportOpen(false)} onImport={importStudents} />}{guideOpen && <GuideModal onClose={() => setGuideOpen(false)} onNavigate={navigate} />}{profileOpen && <ProfileModal profile={profile} onClose={() => setProfileOpen(false)} onSave={saveProfile} onLogout={() => requestConfirmation({ title: "Keluar dari aplikasi", message: "Apakah Anda yakin ingin keluar?", confirmLabel: "Keluar", danger: true, onConfirm: () => { void api.logout().catch(() => undefined); localStorage.clear(); router.push("/login"); } })} />}{confirmRequest && <ConfirmDialog request={confirmRequest} onClose={() => setConfirmRequest(null)} />}<div className="toast-container" aria-live="polite" aria-label="Notifikasi">{toasts.map((t) => <div key={t.id} className={`toast toast-${t.type}`} onClick={() => removeToast(t.id)}><span className="toast-icon">{t.type === "error" ? "❌" : t.type === "success" ? "✅" : "ℹ️"}</span><span className="toast-message">{t.message}</span><button className="toast-close" onClick={() => removeToast(t.id)} aria-label="Tutup">×</button></div>)}</div></div>;
 }

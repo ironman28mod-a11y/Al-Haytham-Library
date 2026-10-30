@@ -59,6 +59,17 @@ export async function logout(): Promise<void> {
   }
 }
 
+/** Error API yang membawa kode status HTTP, agar pemanggil bisa membedakan penyebab. */
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const url = `${apiBase()}${path}`;
   const res = await apiFetch(url, {
@@ -74,7 +85,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const message = typeof body?.error === "string" && body.error.trim()
       ? body.error.trim()
       : `API error ${res.status}${res.statusText ? `: ${res.statusText}` : ""}`;
-    throw new Error(message);
+    throw new ApiError(message, res.status);
   }
   return res.json() as Promise<T>;
 }

@@ -34,6 +34,12 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true }, { status: 201 });
   } catch (err) {
     console.error("POST /api/books error:", err);
-    return NextResponse.json({ error: "Failed to create book" }, { status: 500 });
+    const pgError = err as { code?: string; cause?: { code?: string; message?: string }; message?: string };
+    const errorCode = pgError?.code ?? pgError?.cause?.code;
+    if (errorCode === "23505") {
+      return NextResponse.json({ error: "Kode buku sudah dipakai di database. Coba lagi." }, { status: 409 });
+    }
+    const detail = pgError?.cause?.message ?? pgError?.message ?? "kesalahan tidak diketahui";
+    return NextResponse.json({ error: `Gagal menyimpan ke database: ${detail}` }, { status: 500 });
   }
 }

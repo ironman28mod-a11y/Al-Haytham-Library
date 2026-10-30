@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "../lib/api";
+import { EbookReader, ReadingModeDialog, getSavedReadingMode, rememberReadingMode, type ReadingMode } from "./LibraryApp";
 
 /* ---------- Types ---------- */
 type PortalMember = api.Member;
@@ -332,6 +333,8 @@ export default function MemberPortal({ memberCode, onLogout }: { memberCode: str
   const [avatarReading, setAvatarReading] = useState(false);
   const [avatarError, setAvatarError] = useState("");
   const [cropSource, setCropSource] = useState<string | null>(null);
+  const [reading, setReading] = useState<{ ebook: PortalEBook; mode: ReadingMode } | null>(null);
+  const [modeChooser, setModeChooser] = useState<PortalEBook | null>(null);
 
   // Loan modal
   const [borrowModal, setBorrowModal] = useState<{ book: PortalBook } | null>(null);
@@ -587,7 +590,18 @@ export default function MemberPortal({ memberCode, onLogout }: { memberCode: str
         </>}
 
         {/* ===== KATALOG E-BOOK ===== */}
-        {activePage === "ebooks" && <EbooksCatalog ebooks={ebooksList} onRead={(ebook) => { if (ebook.fileId) window.open(fileLink(ebook.fileId), "_blank"); }} />}
+        {activePage === "ebooks" && <EbooksCatalog ebooks={ebooksList} onRead={(ebook) => {
+          if (!ebook.fileId) return;
+          if (ebook.format !== "PDF") {
+            // Format selain PDF tidak bisa ditampilkan pembaca, biarkan browser yang membuka.
+            window.open(fileLink(ebook.fileId), "_blank");
+            return;
+          }
+          // PDF: pakai mode terakhir perangkat; baru tawarkan pemilih bila belum pernah memilih.
+          const saved = getSavedReadingMode();
+          if (saved) { setReading({ ebook, mode: saved }); return; }
+          setModeChooser(ebook);
+        }} />}
 
         {/* ===== KATALOG BUKU ===== */}
         {activePage === "books" && <BooksCatalog books={booksList} onBorrow={handleBorrow} activeLoans={activeLoans} memberCode={memberCode} />}
@@ -610,6 +624,10 @@ export default function MemberPortal({ memberCode, onLogout }: { memberCode: str
 
       {/* ---- Avatar Crop Modal ---- */}
       {cropSource && <AvatarCropModal imageUrl={cropSource} preview={{ name: profileDraft.name || displayMember.name, role: "Anggota", detail: `${displayMember.code} · ${displayMember.className}`, color: displayMember.color }} onCancel={() => setCropSource(null)} onConfirm={confirmCrop} />}
+
+      {/* ---- Mode Baca + Pembaca E-Book ---- */}
+      {modeChooser && <ReadingModeDialog ebook={modeChooser} onClose={() => setModeChooser(null)} onPick={(mode) => { rememberReadingMode(mode); setReading({ ebook: modeChooser, mode }); setModeChooser(null); }} />}
+      {reading && <EbookReader ebook={reading.ebook} mode={reading.mode} onModeChange={(mode) => { rememberReadingMode(mode); setReading((current) => (current ? { ...current, mode } : current)); }} onClose={() => setReading(null)} />}
     </main>
   </div>;
 }
